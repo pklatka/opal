@@ -1,0 +1,20 @@
+[project]
+name = "opal-symphony"
+version = "0.1.0"
+description = "OPAL (Open Policy Administration Layer) with Symphony extension framework"
+requires-python = ">=3.11"
+dependencies = [
+    "symphony-api",
+    "opal-server",
+    "opal-common",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "pydantic>=1.9.1",
+    "mcp[cli]>=1.0.0",
+    "httpx>=0.28.0",
+]
+
+[tool.uv.sources]
+symphony-api = { workspace = true }
+opal-server = { path = "packages/opal-server", editable = true }
+opal-common = { path = "packages/opal-common", editable = true }

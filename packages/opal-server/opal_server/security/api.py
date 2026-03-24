@@ -5,11 +5,17 @@ from opal_common.authentication.deps import StaticBearerAuthenticator
 from opal_common.authentication.signer import JWTSigner
 from opal_common.logger import logger
 from opal_common.schemas.security import AccessToken, AccessTokenRequest, TokenDetails
+from symphony import tool
 
 
 def init_security_router(signer: JWTSigner, authenticator: StaticBearerAuthenticator):
     router = APIRouter()
 
+    @tool(
+        name="generate_access_token",
+        method="POST",
+        path="/token",
+    )
     @router.post(
         "/token",
         status_code=status.HTTP_200_OK,

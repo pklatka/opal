@@ -27,6 +27,7 @@ from opal_server.data.api import init_data_updates_router
 from opal_server.data.data_update_publisher import DataUpdatePublisher
 from opal_server.loadlimiting import init_loadlimit_router
 from opal_server.policy.bundles.api import router as bundles_router
+from opal_server.policy.crud_api import init_policy_crud_router
 from opal_server.policy.watcher.factory import setup_watcher_task
 from opal_server.policy.watcher.task import PolicyWatcherTask
 from opal_server.policy.webhook.api import init_git_webhook_router
@@ -39,6 +40,51 @@ from opal_server.scopes.scope_repository import ScopeRepository
 from opal_server.security.api import init_security_router
 from opal_server.security.jwks import JwksStaticEndpoint
 from opal_server.statistics import OpalStatistics, init_statistics_router
+from opal_server.symphony_ext import (
+    extension_registry as symphony_registry,
+    goex_registry as symphony_goex_registry,
+    SYSTEM_PROMPTS as symphony_prompts,
+)
+from symphony import mount_symphony
+
+
+def _create_codegen_provider():
+    """Create an LLM provider for server-side code generation.
+
+    Reads ``SYMPHONY_CODEGEN_PROVIDER`` and ``SYMPHONY_CODEGEN_MODEL`` from
+    the environment.  Returns ``None`` if no provider is configured, which
+    causes the server to fall back to ``needs_extension`` (client-side
+    generation).
+    """
+    provider_name = os.environ.get("SYMPHONY_CODEGEN_PROVIDER")
+    if not provider_name:
+        return None
+    model = os.environ.get("SYMPHONY_CODEGEN_MODEL")
+    from symphony.providers import create_provider
+    kwargs = {}
+    if model:
+        kwargs["model"] = model
+    return create_provider(provider_name, **kwargs)
+
+
+def _get_repo_or_none(config):
+    """Return the policy Git Repo if it's cloned and ready, else None."""
+    from pathlib import Path
+    from git.repo import Repo
+    from opal_common.git_utils.repo_cloner import RepoClonePathFinder
+
+    clone_path_finder = RepoClonePathFinder(
+        base_clone_path=config.POLICY_REPO_CLONE_PATH,
+        clone_subdirectory_prefix=config.POLICY_REPO_CLONE_FOLDER_PREFIX,
+        use_fixed_path=config.POLICY_REPO_REUSE_CLONE_PATH,
+    )
+    repo_path = clone_path_finder.get_clone_path()
+    if not repo_path:
+        return None
+    git_path = Path(repo_path) / ".git"
+    if not git_path.exists():
+        return None
+    return Repo(repo_path)
 
 
 class OpalServer:
@@ -242,6 +288,14 @@ class OpalServer:
             tags=["Bundle Server"],
             dependencies=[Depends(authenticator)],
         )
+        policy_crud_router = init_policy_crud_router(
+            pubsub_endpoint=self.pubsub.endpoint,
+        )
+        app.include_router(
+            policy_crud_router,
+            tags=["Policy CRUD"],
+            dependencies=[Depends(authenticator)],
+        )
         app.include_router(data_updates_router, tags=["Data Updates"])
         app.include_router(webhook_router, tags=["Github Webhook"])
         app.include_router(security_router, tags=["Security"])
@@ -274,10 +328,42 @@ class OpalServer:
             self.jwks_endpoint.configure_app(app)
 
         # top level routes (i.e: healthchecks)
+        from symphony import tool as symphony_tool
+
+        @symphony_tool(name="healthcheck", method="GET", path="/healthcheck")
         @app.get("/healthcheck", include_in_schema=False)
-        @app.get("/", include_in_schema=False)
         def healthcheck():
+            """Check if the OPAL server is healthy and responding."""
             return {"status": "ok"}
+
+        @app.get("/", include_in_schema=False)
+        def root():
+            return {"status": "ok"}
+
+        # Register Symphony context providers for L4 code_extension
+        from opal_server.symphony_ext import (
+            set_statistics_context_provider,
+            set_policy_bundle_context_provider,
+            set_codegen_provider,
+        )
+        if self.opal_statistics is not None:
+            set_statistics_context_provider(lambda: self.opal_statistics.state)
+        set_policy_bundle_context_provider(
+            lambda: _get_repo_or_none(opal_server_config)
+        )
+
+        # Configure server-side code generation provider (L2/L3/L4)
+        codegen_provider = _create_codegen_provider()
+        if codegen_provider is not None:
+            set_codegen_provider(codegen_provider)
+
+        # Mount Symphony extension framework endpoints
+        mount_symphony(
+            app,
+            symphony_registry,
+            symphony_prompts,
+            goex_registry=symphony_goex_registry,
+        )
 
         return app
 

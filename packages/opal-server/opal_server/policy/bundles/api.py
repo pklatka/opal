@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import List, Optional
 
 import fastapi.responses
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse
 from git.repo import Repo
 from opal_common.confi.confi import load_conf_if_none
 from opal_common.git_utils.bundle_maker import BundleMaker
@@ -13,6 +14,14 @@ from opal_common.logger import logger
 from opal_common.schemas.policy import PolicyBundle
 from opal_server.config import opal_server_config
 from starlette.responses import RedirectResponse
+from symphony import tool, handle_extension
+from symphony.models import SymphonyExtensionBody
+
+from opal_server.symphony_ext import (
+    post_policy_bundle,
+    _policy_capabilities,
+    goex_registry,
+)
 
 router = APIRouter()
 
@@ -91,15 +100,24 @@ async def get_input_paths_or_throw(
     return paths
 
 
-@router.get("/policy", response_model=PolicyBundle)
-async def get_policy(
-    repo: Repo = Depends(get_repo),
-    input_paths: List[Path] = Depends(get_input_paths_or_throw),
-    base_hash: Optional[str] = Query(
-        None,
-        description="hash of previous bundle already downloaded, server will return a diff bundle.",
-    ),
-):
+def _build_bundle_context(bundle: PolicyBundle) -> dict:
+    """Build the shared context dict for policy bundle extension code."""
+    bundle_dict = bundle.dict() if hasattr(bundle, "dict") else bundle.model_dump()
+    policy_modules = bundle_dict.get("policy_modules", [])
+    return {
+        "policy_modules": policy_modules,
+        "modules": policy_modules,  # alias — matches capability param names
+        "data_modules": bundle_dict.get("data_modules", []),
+        "manifest": bundle_dict.get("manifest", []),
+        "hash": bundle_dict.get("hash", ""),
+        "old_hash": bundle_dict.get("old_hash"),
+        "module_count": len(policy_modules),
+        "data_module_count": len(bundle_dict.get("data_modules", [])),
+    }
+
+
+def _default_get_policy(repo: Repo, input_paths: List[Path], base_hash: Optional[str]) -> PolicyBundle:
+    """Default L0 bundle-building logic (used as default_source for L3 getsource)."""
     maker = BundleMaker(
         repo,
         in_directories=set(input_paths),
@@ -107,7 +125,6 @@ async def get_policy(
         root_manifest_path=opal_server_config.POLICY_REPO_MANIFEST_PATH,
         bundle_ignore=opal_server_config.BUNDLE_IGNORE,
     )
-    # check if commit exist in the repo
     revision = None
     if base_hash:
         try:
@@ -125,3 +142,122 @@ async def get_policy(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"commit with hash {base_hash} was not found in the policy repo!",
         )
+
+
+@tool(
+    name="get_policy_bundle",
+    method="GET",
+    path="/policy",
+    levels=["L0", "L1", "L2", "L3"],
+    level_params={
+        "L0": ["path", "base_hash"],
+        "L1": ["path", "base_hash", "extension_level", "extension_code", "execution_mode", "reversal_code"],
+        "L2": ["path", "base_hash", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+        "L3": ["path", "base_hash", "extension_level", "task_description", "execution_mode", "reversal_code"],
+    },
+    level_overrides={
+        "L0": {
+            "description": (
+                "Fetch policy bundle from the tracked Git repository. "
+                "Returns Rego policy modules, data modules, and a manifest. "
+                "Supports differential bundles via base_hash parameter."
+            ),
+        },
+        "L1": {
+            "description": (
+                "Fetch policy bundle with extension support. The bundle is built "
+                "from Git, then extension_code runs as post-processing to filter, "
+                "transform, or augment the bundle (e.g. exclude test policies, "
+                "filter by environment)."
+            ),
+        },
+        "L2": {
+            "description": (
+                "Fetch policy bundle with dynamic extension. The bundle is built "
+                "from Git, then the system auto-generates extension code for "
+                "advanced bundle processing."
+            ),
+        },
+        "L3": {
+            "description": (
+                "Fetch policy bundle with source-aware extension. The system "
+                "reads the endpoint source code and generates targeted extension "
+                "code that supplements the standard bundle building logic."
+            ),
+        },
+    },
+)
+@router.get("/policy", response_model=PolicyBundle)
+async def get_policy(
+    repo: Repo = Depends(get_repo),
+    input_paths: List[Path] = Depends(get_input_paths_or_throw),
+    base_hash: Optional[str] = Query(
+        None,
+        description="hash of previous bundle already downloaded, server will return a diff bundle.",
+    ),
+    ext: Optional[SymphonyExtensionBody] = Body(None),
+):
+    """Serve policy bundles with optional Symphony extension support.
+
+    Extension levels:
+    - **L0**: Serve full or differential policy bundle from Git repo
+    - **L1**: Post-processing via extension_code (filter, transform bundle)
+    - **L2**: Auto-generated extension code for advanced bundle processing
+    - **L3**: Source-aware — LLM reads endpoint code and generates extensions
+
+    Extension fields (extension_level, extension_code, task_description,
+    execution_mode, reversal_code) are accepted as a JSON request body to
+    avoid URL length limits on large extension_code payloads.
+    """
+    ext = ext or SymphonyExtensionBody()
+    extension_level = ext.extension_level
+    extension_code = ext.extension_code
+    task_description = ext.task_description
+    execution_mode = ext.execution_mode
+    reversal_code = ext.reversal_code
+
+    bundle = _default_get_policy(repo, input_paths, base_hash)
+    context = _build_bundle_context(bundle)
+
+    outcome = await handle_extension(
+        level=extension_level,
+        extension_code=extension_code,
+        task_description=task_description,
+        execution_mode=execution_mode,
+        reversal_code=reversal_code,
+        extension_point=post_policy_bundle,
+        default_fn=lambda: context["policy_modules"],
+        context=context,
+        all_capabilities=_policy_capabilities,
+        goex_registry=goex_registry,
+        original_call='result = context["policy_modules"]',
+        default_source=_default_get_policy,
+        endpoint_path="/policy",
+        trigger_condition=lambda res: bool(extension_code) or bool(task_description),
+    )
+
+    ext = outcome.ext_result
+
+    # L0 path: no extension triggered — return raw bundle
+    if not ext.triggered and not outcome.needs_extension:
+        return bundle
+
+    # L1+ path: rebuild bundle dict with extension results
+    bundle_dict = bundle.dict() if hasattr(bundle, "dict") else bundle.model_dump()
+    filtered = outcome.results
+    if isinstance(filtered, list) and all(isinstance(m, dict) for m in filtered):
+        bundle_dict["policy_modules"] = filtered
+        bundle_dict["manifest"] = [m.get("path", "") for m in filtered] + [
+            d.get("path", "") for d in bundle_dict.get("data_modules", [])
+        ]
+
+    bundle_dict["extension_triggered"] = ext.triggered
+    bundle_dict["generated_code"] = ext.generated_code
+    bundle_dict["goex_record_id"] = ext.goex_record_id
+    bundle_dict["goex_mode"] = execution_mode == "goex"
+    bundle_dict["goex_reversal_code"] = ext.goex_reversal_code
+    bundle_dict["needs_extension"] = outcome.needs_extension
+    if outcome.extension_context:
+        bundle_dict["extension_context"] = outcome.extension_context
+
+    return JSONResponse(bundle_dict)

@@ -8,7 +8,8 @@ from uuid import uuid4
 
 import opal_server
 import pydantic
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, status
+from fastapi.responses import JSONResponse
 from fastapi_websocket_pubsub.event_notifier import Subscription, TopicList
 from fastapi_websocket_pubsub.pub_sub_server import PubSubEndpoint
 from opal_common.async_utils import TasksPool
@@ -106,6 +107,12 @@ class OpalStatistics:
         self._seen_servers: Dict[str, datetime] = {}
         self._periodic_keepalive_task: asyncio.Task | None = None
 
+        # Seed demo clients for testing if enabled (default: true)
+        if os.environ.get("OPAL_SEED_DEMO_CLIENTS", "true").lower() in (
+            "true", "1", "yes",
+        ):
+            self._seed_demo_clients()
+
     @property
     def state(self) -> ServerStats:
         return self._state
@@ -151,6 +158,67 @@ class OpalStatistics:
 
     def _publish(self, channel: str, message: Any):
         self._publish_tasks.add_task(self._endpoint.publish([channel], message))
+
+    def _seed_demo_clients(self):
+        """Populate statistics with realistic simulated OPAL clients.
+
+        Called on startup when OPAL_SEED_DEMO_CLIENTS is set (defaults to
+        "true").  Creates 23 clients across 5 active topics so that
+        statistics-related tests exercise real data analysis — the dataset is
+        intentionally too large to count by eye, and "compliance_audit" has
+        zero subscribers so the zero-subscriber detection capability produces a
+        non-trivial finding.
+        """
+        demo_clients = [
+            # Web API tier (4 replicas)
+            ("opal-client-web-api-01",     ["policy_data", "users"]),
+            ("opal-client-web-api-02",     ["policy_data", "users"]),
+            ("opal-client-web-api-03",     ["policy_data", "users", "feature_flags"]),
+            ("opal-client-web-api-04",     ["policy_data", "feature_flags"]),
+            # Authorization services (4 replicas)
+            ("opal-client-authz-svc-01",   ["policy_data", "roles"]),
+            ("opal-client-authz-svc-02",   ["policy_data", "roles"]),
+            ("opal-client-authz-svc-03",   ["policy_data", "roles", "users"]),
+            ("opal-client-authz-svc-04",   ["roles"]),
+            # User management services
+            ("opal-client-user-svc-01",    ["users"]),
+            ("opal-client-user-svc-02",    ["users", "roles"]),
+            ("opal-client-user-svc-03",    ["users", "policy_data"]),
+            # Audit services — subscribed to audit_logs only
+            ("opal-client-audit-svc-01",   ["audit_logs"]),
+            ("opal-client-audit-svc-02",   ["audit_logs"]),
+            # Gateway / proxy tier (3 instances)
+            ("opal-client-gateway-01",     ["policy_data", "users", "roles"]),
+            ("opal-client-gateway-02",     ["policy_data", "users", "roles"]),
+            ("opal-client-gateway-03",     ["policy_data", "feature_flags"]),
+            # Analytics and reporting
+            ("opal-client-analytics-01",   ["users", "roles"]),
+            ("opal-client-analytics-02",   ["users", "audit_logs"]),
+            ("opal-client-reporting-01",   ["users", "roles", "policy_data"]),
+            # Mobile backend
+            ("opal-client-mobile-api-01",  ["policy_data", "users", "feature_flags"]),
+            ("opal-client-mobile-api-02",  ["policy_data", "feature_flags"]),
+            # Background workers
+            ("opal-client-worker-01",      ["policy_data"]),
+            ("opal-client-worker-02",      ["roles", "users"]),
+            # NOTE: "compliance_audit" is intentionally absent — zero subscribers.
+            # This is the interesting finding that L1-L4 extensions should detect
+            # while L0 is likely to miss it or be imprecise.
+        ]
+
+        for client_id, topics in demo_clients:
+            rpc_id = uuid4().hex
+            ch = ChannelStats(rpc_id=rpc_id, client_id=client_id, topics=topics)
+            self._state.clients[client_id] = [ch]
+            self._rpc_id_to_client_id[rpc_id] = client_id
+
+        # Add a second server replica so server_count is non-trivial
+        self._state.servers.add(uuid4().hex)
+
+        logger.info(
+            "Seeded {count} demo clients into statistics",
+            count=len(demo_clients),
+        )
 
     async def run(self):
         """Subscribe to two channels to be able to sync add and delete of
@@ -369,6 +437,24 @@ class OpalStatistics:
             )
 
 
+def _serialize_state(obj):
+    """Make a state dict JSON-serializable (datetime → ISO, set → list)."""
+    if isinstance(obj, dict):
+        return {k: _serialize_state(v) for k, v in obj.items()}
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, set):
+        return sorted(obj)
+    elif isinstance(obj, list):
+        return [_serialize_state(item) for item in obj]
+    return obj
+
+
+def _default_get_statistics(stats_state) -> dict:
+    """Default L0 statistics logic — serialize state to dict."""
+    return stats_state.dict() if hasattr(stats_state, "dict") else stats_state.model_dump()
+
+
 def init_statistics_router(stats: Optional[OpalStatistics] = None):
     """Initializes a route where a client (or any other network peer) can
     inquire what opal clients are currently connected to the server and on what
@@ -377,11 +463,77 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
     If the OPAL server does not have statistics enabled, the route will
     return 501 Not Implemented
     """
+    from symphony import tool, handle_extension
+    from symphony.models import SymphonyExtensionBody
+    from opal_server.symphony_ext import (
+        post_statistics,
+        _statistics_capabilities,
+        goex_registry,
+    )
+
     router = APIRouter()
 
+    @tool(
+        name="get_statistics",
+        method="GET",
+        path="/statistics",
+        levels=["L0", "L1", "L2", "L3"],
+        level_params={
+            "L0": [],
+            "L1": ["extension_level", "extension_code", "execution_mode", "reversal_code"],
+            "L2": ["extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+            "L3": ["extension_level", "task_description", "execution_mode", "reversal_code"],
+        },
+        level_overrides={
+            "L0": {
+                "description": (
+                    "Get OPAL server statistics: connected clients, their "
+                    "subscribed topics, server replicas, and uptime."
+                ),
+            },
+            "L1": {
+                "description": (
+                    "Get server statistics with extension support. Raw stats "
+                    "are collected first, then extension_code runs to compute "
+                    "aggregates, detect anomalies, or generate alerts."
+                ),
+            },
+            "L2": {
+                "description": (
+                    "Get server statistics with dynamic extension. The system "
+                    "auto-generates extension code for advanced analytics."
+                ),
+            },
+            "L3": {
+                "description": (
+                    "Get server statistics with source-aware extension. The system "
+                    "reads the endpoint source code and generates targeted extension "
+                    "code that supplements the standard statistics logic."
+                ),
+            },
+        },
+    )
     @router.get("/statistics", response_model=ServerStats)
-    async def get_statistics():
-        """Route to serve server statistics."""
+    async def get_statistics(
+        ext: Optional[SymphonyExtensionBody] = Body(None),
+    ):
+        """Route to serve server statistics with optional Symphony extension.
+
+        Extension levels:
+        - **L0**: Return raw statistics
+        - **L1**: Post-processing via extension_code (aggregation, alerting)
+        - **L2**: Auto-generated extension code for advanced analytics
+        - **L3**: Source-aware — LLM reads endpoint code and generates extensions
+
+        Extension fields are accepted as a JSON request body to avoid URL
+        length limits on large extension_code payloads.
+        """
+        ext = ext or SymphonyExtensionBody()
+        extension_level = ext.extension_level
+        extension_code = ext.extension_code
+        task_description = ext.task_description
+        execution_mode = ext.execution_mode
+        reversal_code = ext.reversal_code
         if stats is None:
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -391,11 +543,65 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
                 },
             )
         logger.info("Serving statistics")
-        return stats.state
+        state = stats.state
+        state_dict = _default_get_statistics(state)
+        context = {"stats": state_dict}
 
+        outcome = await handle_extension(
+            level=extension_level,
+            extension_code=extension_code,
+            task_description=task_description,
+            execution_mode=execution_mode,
+            reversal_code=reversal_code,
+            extension_point=post_statistics,
+            default_fn=lambda: state_dict,
+            context=context,
+            all_capabilities=_statistics_capabilities,
+            goex_registry=goex_registry,
+            original_call='result = context["stats"]',
+            default_source=_default_get_statistics,
+            endpoint_path="/statistics",
+            trigger_condition=lambda res: bool(extension_code) or bool(task_description),
+        )
+
+        ext = outcome.ext_result
+
+        # L0 path — return raw state model
+        if not ext.triggered and not outcome.needs_extension:
+            return state
+
+        # needs_extension path
+        if outcome.needs_extension:
+            return JSONResponse(_serialize_state({
+                **state_dict,
+                "needs_extension": True,
+                "extension_context": outcome.extension_context,
+            }))
+
+        # Extension triggered — merge results into state_dict
+        results = outcome.results
+        if len(results) == 1 and isinstance(results[0], dict):
+            state_dict.update(results[0])
+        elif results:
+            state_dict["extension_results"] = results
+
+        state_dict["extension_triggered"] = ext.triggered
+        state_dict["generated_code"] = ext.generated_code
+        if ext.goex_record_id:
+            state_dict["goex_record_id"] = ext.goex_record_id
+            state_dict["goex_mode"] = execution_mode == "goex"
+            state_dict["goex_reversal_code"] = ext.goex_reversal_code
+
+        return JSONResponse(_serialize_state(state_dict))
+
+    @tool(
+        name="get_stats_brief",
+        method="GET",
+        path="/stats",
+    )
     @router.get("/stats", response_model=ServerStatsBrief)
     async def get_stat_counts():
-        """Route to serve only server and client instanace counts."""
+        """Route to serve only server and client instance counts."""
         if stats is None:
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,

@@ -106,7 +106,7 @@ class ServerDataSourceConfig(BaseModel):
         + " if set, the clients will be redirected to this url when requesting to fetch data sources.",
     )
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def check_passwords_match(cls, values):
         config, redirect_url = values.get("config"), values.get("external_source_url")
         if config is None and redirect_url is None:

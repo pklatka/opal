@@ -134,3 +134,6 @@ dmypy.json
 *.iml
 
 .DS_Store
+
+# OPAL policy repo clone (for local testing)
+regoclone/
