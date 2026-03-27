@@ -4,7 +4,7 @@ OPAL MCP Server (FastMCP / Hand-Written)
 
 Exposes the Symphony-enhanced OPAL server API as MCP tools.
 At startup, the tool descriptions are enriched with per-level extension
-documentation built from the Symphony manifest.
+documentation built directly from the local Symphony app and registry.
 
 Usage:
     uv run python mcp_server.py
@@ -20,6 +20,9 @@ from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from opal_server.main import app
+from opal_server.symphony_ext import extension_registry
+from symphony.manifest import build_tool_descriptions_from_app
 
 logger = logging.getLogger("opal.mcp_server")
 
@@ -95,18 +98,14 @@ def _delete(path: str, body: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Try to build enriched descriptions from Symphony manifest
+# Try to build enriched descriptions directly from the Symphony app
 # ---------------------------------------------------------------------------
 
 _tool_descriptions: dict[str, str] = {}
 try:
-    # Try fetching manifest from running server
-    resp = _get_client().get(f"{API_URL}/symphony/manifest")
-    if resp.is_success:
-        from symphony.manifest import build_tool_descriptions
-        _tool_descriptions = build_tool_descriptions(resp.json())
+    _tool_descriptions = build_tool_descriptions_from_app(app, extension_registry)
 except Exception:
-    logger.debug("Could not fetch manifest; using base descriptions")
+    logger.debug("Could not build Symphony tool descriptions; using base descriptions")
 
 # ---------------------------------------------------------------------------
 # FastMCP server & tool definitions
@@ -353,7 +352,7 @@ def list_policy_modules() -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(description=_tool_descriptions.get("code_extension", ""))
 def code_extension(
     prompt: str,
     extension_point: str | None = None,
