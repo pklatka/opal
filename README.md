@@ -5,9 +5,16 @@
 
 ## Overview
 
-OPAL is an administration layer for Open Policy Agent (OPA) that detects changes to both policy and policy data in real time, pushing live updates to policy agents. This example integrates Symphony's extension framework directly into the OPAL server, adding four benchmark-oriented control-plane workflows: policy bundle triage, guarded policy hotfixes, data update publishing, and server statistics.
+OPAL is an administration layer for Open Policy Agent (OPA) that detects changes to both policy and policy data in real time, pushing live updates to policy agents. This example integrates Symphony's extension framework directly into the OPAL server and benchmarks it through stateful outage scenarios instead of toy extraction prompts.
 
-The benchmark now mirrors real operator tasks more closely: incident-time policy lookup, fleet blast-radius reporting, callback-aware data rollout sanitization, and a GoEx-protected emergency policy hotfix. A set of **policy CRUD endpoints** still allows LLM agents to create, update, and delete `.rego` modules directly in the tracked Git clone — each operation commits locally so changes are immediately visible in subsequent bundle fetches and properly reported in differential bundles.
+The benchmark focuses on Symphony-on-OPAL behavior:
+
+- applying an existing production break-glass policy to an active outage gate
+- deciding whether to trigger an emergency rollout from live OPAL statistics
+- creating a new tightly scoped outage policy when no existing module covers the action
+- replaying the same mutation patterns through GoEx with record capture and reversal
+
+A set of **policy CRUD endpoints** still allows LLM agents to create, update, and delete `.rego` modules directly in the tracked Git clone. Each operation commits locally so changes are immediately visible in subsequent bundle fetches and properly reported in differential bundles.
 
 ## Capabilities
 
@@ -226,170 +233,75 @@ uv run python agent_cli.py --provider gemini --level L2 "Analyze which topics ha
 
 ---
 
-## Test Plan 1: L0 vs L1 vs L2 vs L3 vs L4
+## Benchmark Cases
 
-The exact benchmark prompt strings live in
-[`TESTING_PLAN.md`](TESTING_PLAN.md) and
-[`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh). The examples
-below describe the same scenarios at a higher level.
+The exact prompts live in [`TESTING_PLAN.md`](TESTING_PLAN.md) and the runner
+scripts. The benchmark now uses stateful outage scenarios instead of direct
+answer extraction.
 
-### Case A: Incident Policy Triage (read-only)
+### Standard suite
 
-**Prompt:** see the exact multi-line `opal/test1` prompt in [`TESTING_PLAN.md`](TESTING_PLAN.md).
-
-```bash
-uv run python agent_cli.py --level L0 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
-uv run python agent_cli.py --level L1 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
-uv run python agent_cli.py --level L2 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
-uv run python agent_cli.py --level L3 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
-uv run python agent_cli.py --level L4 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
-```
-
-| Level | Expected behavior | Features exercised |
-|-------|------------------|-------------------|
-| **L0** | Returns the full policy bundle; the model still has to identify the correct break-glass module from realistic distractors. | Vanilla API, MCP routing |
-| **L1** | Sends extension code that filters the bundle down to the single incident policy. | Sandbox execution, capability chaining, read-only auto-approve |
-| **L2** | Sends a task description and lets the server generate the filtering logic. | Two-phase flow, `needs_extension`, server codegen |
-| **L3** | Server reads `_default_get_policy` and generates source-aware bundle triage code. | Source code reading, `server_generate_and_execute()` |
-| **L4** | Uses the same `get_policy_bundle` route with `extension_level="L4"` so the benchmark stays on the domain endpoint instead of drifting to generic tooling. | Freeform extension on the benchmarked route |
-
-### Case B: Fleet Blast-Radius Report (read-only)
-
-**Prompt:** see the exact multi-line `opal/test2` prompt in [`TESTING_PLAN.md`](TESTING_PLAN.md).
+Run the standard matrix:
 
 ```bash
-uv run python agent_cli.py --level L0 "This is an OPAL benchmark extraction task, not a dashboard-writing exercise. Benchmark auth is already configured. Analyze topics [policy_data, incident_access, feature_flags, directory_sync, audit_logs, compliance_audit]. Use the normalized benchmark_stats view to compute client counts per topic, zero-subscriber topics, exact audit_logs subscribers, exact incident_access subscribers, and total client/server counts."
-uv run python agent_cli.py --level L1 "This is an OPAL benchmark extraction task, not a dashboard-writing exercise. Benchmark auth is already configured. Analyze topics [policy_data, incident_access, feature_flags, directory_sync, audit_logs, compliance_audit]. Use the normalized benchmark_stats view to compute client counts per topic, zero-subscriber topics, exact audit_logs subscribers, exact incident_access subscribers, and total client/server counts."
-uv run python agent_cli.py --level L2 "This is an OPAL benchmark extraction task, not a dashboard-writing exercise. Benchmark auth is already configured. Analyze topics [policy_data, incident_access, feature_flags, directory_sync, audit_logs, compliance_audit]. Use the normalized benchmark_stats view to compute client counts per topic, zero-subscriber topics, exact audit_logs subscribers, exact incident_access subscribers, and total client/server counts."
+./scripts/run_opal_tests.sh --level L0,L1,L2,L3,L4 anthropic haiku
 ```
 
-| Level | Expected behavior | Features exercised |
-|-------|------------------|-------------------|
-| **L0** | Returns normalized benchmark statistics so the model can extract exact counts and subscriber lists without reverse-engineering control-plane channels. | Benchmark-safe normalization, exact extraction |
-| **L1** | Extension code still triggers, but the final answer is expected to use the normalized benchmark view for exact fields. | Multi-capability composition plus normalized stats |
-| **L2** | Server generates benchmark-focused statistics logic while preserving the same `/statistics` route shape. | Two-phase with benchmark-focused analytics |
+Scenarios:
 
-### Case C: Callback-Aware Emergency Data Rollout (mutating)
+- `opal/test1`: the active outage gate is too restrictive; the agent must find
+  the correct existing production break-glass policy and apply that logic to
+  `incident/payments_outage_gate.rego`
+- `opal/test2`: the agent must inspect live OPAL statistics, decide whether to
+  trigger the emergency rollout, and publish the production-safe incident
+  access, directory, and feature-flag updates
+- `opal/test3`: no existing module covers the recovery action; the agent must
+  create `incident/payments_replica_promote_hotfix.rego`
 
-**Prompt:** see the exact multi-line `opal/test3` prompt in [`TESTING_PLAN.md`](TESTING_PLAN.md).
+Standard-suite verification:
+
+- benchmark state is reset before every job via `POST /symphony/benchmark/reset`
+- the runner checks the broken baseline before launching the agent
+- after the run, the runner verifies live client state directly
+- strict fenced JSON is still required and compared against the expected
+  summary fixture
+
+### GoEx suite
+
+Run the GoEx matrix:
 
 ```bash
-uv run python agent_cli.py --level L0 "This is an OPAL benchmark mutation task, not a rollout-planning exercise. Benchmark auth is already configured. Publish a data update with a one-time callback to https://ops.internal/v1/opal/update-report. Allow only incident_access, directory_sync, and feature_flags topics; exclude audit_logs; reject staging hosts; validate URLs; deduplicate by topic+dst_path; and force save_method=PUT."
-uv run python agent_cli.py --level L1 "This is an OPAL benchmark mutation task, not a rollout-planning exercise. Benchmark auth is already configured. Publish a data update with a one-time callback to https://ops.internal/v1/opal/update-report. Allow only incident_access, directory_sync, and feature_flags topics; exclude audit_logs; reject staging hosts; validate URLs; deduplicate by topic+dst_path; and force save_method=PUT."
-uv run python agent_cli.py --level L2 "This is an OPAL benchmark mutation task, not a rollout-planning exercise. Benchmark auth is already configured. Publish a data update with a one-time callback to https://ops.internal/v1/opal/update-report. Allow only incident_access, directory_sync, and feature_flags topics; exclude audit_logs; reject staging hosts; validate URLs; deduplicate by topic+dst_path; and force save_method=PUT."
+./scripts/run_opal_goex_tests.sh --levels "L0 L1 L2 L3 L4" --cases "current test1 test3" anthropic haiku
 ```
 
-| Level | Expected behavior | Features exercised |
-|-------|------------------|-------------------|
-| **L0** | Publishes the raw batch and callback as-is. | Vanilla publish, no sanitization |
-| **L1** | Extension code sanitizes the rollout batch before publish and preserves the one-time callback. | Capability chaining, sanitization pipeline, `mutates=True` detection |
-| **L2** | Server generates the sanitization pipeline or signals `needs_extension`. | Two-phase + mutation handling |
+GoEx cases:
 
----
+- `current`: existing cache-failover hotfix scenario
+- `test1`: update `incident/payments_outage_gate.rego` through GoEx and then
+  reverse it
+- `test3`: create `incident/payments_replica_promote_hotfix.rego` through GoEx
+  and then reverse it
 
-## Test Plan 2: Cross-LLM Comparison (Reasoning vs No-Reasoning)
+GoEx verification:
 
-Run each Case (A, B, C) across providers and reasoning modes:
+- reset benchmark state before each case
+- capture exactly one GoEx record in `L1` to `L4`
+- verify the live state change on OPAL clients
+- reverse the record
+- verify the original baseline is restored
 
-```bash
-# Ollama with reasoning (default)
-uv run python agent_cli.py --provider ollama --level L1 "<PROMPT>"
+### Cross-model comparison
 
-# Ollama without reasoning
-uv run python agent_cli.py --provider ollama --level L1 --no-reasoning "<PROMPT>"
+Both suites export benchmark diagnostics under `stats/opal/` and
+`stats/opal/goex/`, including normalized token and latency fields plus L0 delta
+fields. That lets you compare:
 
-# Anthropic (Claude) with reasoning
-uv run python agent_cli.py --provider anthropic --level L1 "<PROMPT>"
+- L0 baseline vs extension-assisted levels
+- providers and models
+- reasoning vs no-reasoning
+- direct mutation vs GoEx mutation
 
-# Anthropic without reasoning
-uv run python agent_cli.py --provider anthropic --level L1 --no-reasoning "<PROMPT>"
-
-# Gemini with reasoning
-uv run python agent_cli.py --provider gemini --level L1 "<PROMPT>"
-
-# Gemini without reasoning
-uv run python agent_cli.py --provider gemini --level L1 --no-reasoning "<PROMPT>"
-```
-
-### Comparison Matrix
-
-| Provider | Reasoning | Prompt | Metrics to Capture |
-|----------|-----------|--------|-------------------|
-| Ollama (qwen3:8b) | ✅ on | Case A, B, C | Tokens, time, correctness, code quality |
-| Ollama (qwen3:8b) | ❌ off | Case A, B, C | Tokens, time, correctness, code quality |
-| Anthropic (haiku) | ✅ on | Case A, B, C | Tokens, time, correctness, code quality |
-| Anthropic (haiku) | ❌ off | Case A, B, C | Tokens, time, correctness, code quality |
-| Gemini (2.5-flash) | ✅ on | Case A, B, C | Tokens, time, correctness, code quality |
-| Gemini (2.5-flash) | ❌ off | Case A, B, C | Tokens, time, correctness, code quality |
-
----
-
-## Test Plan 3: GoEx Modes Comparison (Guarded Policy Hotfix)
-
-The GoEx benchmark now exercises a realistic control-plane mutation without
-adding a benchmark-specific OPAL API route: it uses the existing
-`code_extension` endpoint plus the existing policy module CRUD endpoints.
-
-### Case G1: L0 Baseline (direct hotfix apply)
-
-```bash
-uv run python agent_cli_goex.py \
-  --api-url http://127.0.0.1:8000 \
-  --mcp-url http://127.0.0.1:8000/mcp/sse \
-  --codegen-provider ws://127.0.0.1:8000/symphony/codegen/ws \
-  --provider anthropic \
-  --level L0 \
-  --execution-mode direct
-```
-
-What to observe:
-
-- the harness uses `list_policy_modules` and then `create_policy_module` or
-  `update_policy_module`
-- `incident/cache_failover_hotfix.rego` is created or updated
-- the harness performs explicit cleanup after verification
-- no GoEx record is created in direct mode
-
-### Case G2: L1–L3 GoEx hotfix apply
-
-```bash
-uv run python agent_cli_goex.py \
-  --api-url http://127.0.0.1:8000 \
-  --mcp-url http://127.0.0.1:8000/mcp/sse \
-  --codegen-provider ws://127.0.0.1:8000/symphony/codegen/ws \
-  --provider anthropic \
-  --level L1 \
-  --execution-mode goex
-```
-
-What to observe:
-
-- the agent uses the existing `code_extension` endpoint with
-  `extension_point="policy_hotfix"`
-- extension code or generated code calls `upsert_policy_module(...)`
-- GoEx records the mutation because policy writes are `mutates=True`
-- the created module contains package `app.incident.cache_failover_hotfix`
-- the record includes executable `reversal_code`
-
-### Case G3: L4 freeform hotfix apply
-
-```bash
-uv run python agent_cli_goex.py \
-  --api-url http://127.0.0.1:8000 \
-  --mcp-url http://127.0.0.1:8000/mcp/sse \
-  --codegen-provider ws://127.0.0.1:8000/symphony/codegen/ws \
-  --provider anthropic \
-  --level L4 \
-  --execution-mode goex
-```
-
-What to observe:
-
-- the agent prefers `code_extension` with `extension_point="policy_hotfix"`
-- generated code uses the hotfix capability set and the hotfix context provider
-- GoEx still captures the mutation and reversal metadata
-
-### GoEx SRE endpoint verification
+### GoEx SRE endpoints
 
 After a GoEx run:
 

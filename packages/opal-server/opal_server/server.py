@@ -44,7 +44,15 @@ from opal_server.symphony_ext import (
     extension_registry as symphony_registry,
     goex_registry as symphony_goex_registry,
 )
-from opal_server.policy.module_ops import delete_policy_module as delete_policy_module_from_repo
+from opal_server.policy.module_ops import (
+    delete_policy_module as delete_policy_module_from_repo,
+    upsert_policy_module as upsert_policy_module_in_repo,
+)
+from opal_server.benchmark_scenarios import (
+    benchmark_reset_delete_paths,
+    benchmark_reset_entries,
+    benchmark_reset_policy_modules,
+)
 from symphony import SYSTEM_PROMPTS as symphony_prompts, mount_symphony
 
 
@@ -365,36 +373,7 @@ class OpalServer:
             if data_update_publisher is None:
                 raise HTTPException(status_code=503, detail="data update publisher unavailable")
 
-            reset_entries = [
-                DataSourceEntry(
-                    url="http://opal-benchmark-data:8081/v1/bootstrap/incident_access",
-                    topics=["incident_access"],
-                    dst_path="/incident/access",
-                    save_method="PUT",
-                    data={},
-                ),
-                DataSourceEntry(
-                    url="http://opal-benchmark-data:8081/v1/bootstrap/directory_sync",
-                    topics=["directory_sync"],
-                    dst_path="/directory/emergency/groups",
-                    save_method="PUT",
-                    data={"groups": [], "source": "benchmark-reset"},
-                ),
-                DataSourceEntry(
-                    url="http://opal-benchmark-data:8081/v1/bootstrap/feature_flags",
-                    topics=["feature_flags"],
-                    dst_path="/feature_flags/cache_failover",
-                    save_method="PUT",
-                    data={"flag": "cache_failover", "enabled": False, "rollout": "benchmark-reset"},
-                ),
-                DataSourceEntry(
-                    url="http://opal-benchmark-data:8081/v1/bootstrap/audit_logs",
-                    topics=["audit_logs"],
-                    dst_path="/audit/incident/raw",
-                    save_method="PUT",
-                    data={},
-                ),
-            ]
+            reset_entries = [DataSourceEntry(**entry) for entry in benchmark_reset_entries()]
             await data_update_publisher.publish_data_updates(
                 DataUpdate(
                     reason="Restore OPAL benchmark baseline",
@@ -402,37 +381,39 @@ class OpalServer:
                 )
             )
 
-            hotfix_removed = False
-            hotfix_missing = False
             try:
                 repo = _get_repo_or_none(opal_server_config)
                 if repo is None:
-                    hotfix_missing = True
-                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="benchmark reset failed: tracked policy repo unavailable",
+                    )
+                for module_path in benchmark_reset_delete_paths():
                     delete_policy_module_from_repo(
                         repo,
-                        "incident/cache_failover_hotfix.rego",
-                        "Cleanup benchmark hotfix during reset",
+                        module_path,
+                        f"Cleanup benchmark module {module_path} during reset",
                         missing_ok=True,
                     )
-                    hotfix_removed = True
+                for module_path, rego_content in benchmark_reset_policy_modules().items():
+                    upsert_policy_module_in_repo(
+                        repo,
+                        module_path,
+                        rego_content,
+                        f"Restore benchmark baseline module {module_path}",
+                    )
             except Exception as exc:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"benchmark reset failed to clean hotfix: {exc!s}",
+                    detail=f"benchmark reset failed to restore policy baseline: {exc!s}",
                 ) from exc
 
             return {
                 "ok": True,
                 "reason": "Restore OPAL benchmark baseline",
-                "paths_reset": [
-                    "/incident/access",
-                    "/directory/emergency/groups",
-                    "/feature_flags/cache_failover",
-                    "/audit/incident/raw",
-                ],
-                "hotfix_removed": hotfix_removed,
-                "hotfix_missing": hotfix_missing,
+                "paths_reset": [entry["dst_path"] for entry in benchmark_reset_entries()],
+                "policy_modules_restored": sorted(benchmark_reset_policy_modules()),
+                "policy_modules_removed": benchmark_reset_delete_paths(),
             }
 
         # Register Symphony context providers for L4 code_extension

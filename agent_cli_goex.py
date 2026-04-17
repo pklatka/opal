@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-OPAL GoEx harness — policy hotfix apply with record capture and reversal.
+OPAL GoEx harness — stateful OPAL mutation benchmarks with record capture and reversal.
 
 Usage (from repo root):
     uv run python examples/opal/agent_cli_goex.py \\
@@ -33,6 +33,7 @@ if str(_repo_root) not in sys.path:
 from symphony import SymphonyRunner
 from symphony.providers import create_provider
 from symphony.stats_export import make_export_callbacks
+from opal_server.benchmark_scenarios import get_goex_scenario
 
 
 class _CodegenWebsocketClient:
@@ -125,25 +126,8 @@ class _CodegenWebsocketClient:
         return {"ok": True, "content": "".join(parts) or resp.content}
 
 
-HOTFIX_MODULE_PATH = "incident/cache_failover_hotfix.rego"
-HOTFIX_PACKAGE = "app.incident.cache_failover_hotfix"
-HOTFIX_COMMIT_MESSAGE = "Apply emergency cache failover hotfix"
-HOTFIX_SUMMARY_TOKEN = "cache_failover"
-
-DEFAULT_TASK = f"""A sev-1 outage in the production payments cluster forced traffic onto a stale cache replica. Apply an emergency OPAL policy hotfix so the on-call responders can run the cache failover operation while the incident is active. Use GoEx mode for safety and auditability.
-
-Requirements:
-- Use module_path "{HOTFIX_MODULE_PATH}".
-- Use commit_message "{HOTFIX_COMMIT_MESSAGE}".
-- The module must declare package "{HOTFIX_PACKAGE}".
-- Include `default allow = false`.
-- The policy should allow the request only when:
-  - input.incident.severity == "sev-1"
-  - input.actor.class == "oncall_responder"
-  - input.flags.emergency_override == true
-  - input.request.operation == "cache_failover"
-
-If the module already exists, replace it with the corrected hotfix. End with a short operator-facing summary."""
+DEFAULT_SCENARIO = get_goex_scenario("current")
+HOTFIX_MODULE_PATH = DEFAULT_SCENARIO.module_path
 
 GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L1": (
@@ -166,7 +150,7 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
         "You are running an OPAL GoEx test at L3. Use the existing code_extension tool, not any benchmark-specific "
         "hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. "
         "Use a detailed prompt that tells the server to use the provided policy bundle and current module context to "
-        "generate the cache failover hotfix and matching reversal logic. The final result should stay flat: return the "
+        "generate the requested outage policy change and matching reversal logic. The final result should stay flat: return the "
         "upsert_policy_module dict directly, with any extra metadata added onto that dict."
     ),
     "L4": (
@@ -181,8 +165,8 @@ DIRECT_SYSTEM_PROMPT = (
     "You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any "
     "nonexistent apply_policy_hotfix endpoint. First call list_policy_modules. If the hotfix module "
     "already exists, call update_policy_module; otherwise call create_policy_module. Use module_path "
-    "and commit_message from the task, and provide rego_content that implements the requested cache "
-    "failover hotfix."
+    "and commit_message from the task, and provide rego_content that implements the requested outage "
+    "policy change."
 )
 
 PASS = "\033[32mPASS\033[0m"
@@ -264,6 +248,16 @@ def _get_record(api_url: str, record_id: str) -> dict[str, Any]:
     return resp.json()
 
 
+def _reset_benchmark_state(api_url: str) -> dict[str, Any]:
+    resp = httpx.post(
+        f"{api_url.rstrip('/')}/symphony/benchmark/reset",
+        headers=_auth_headers(),
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _list_policy_modules(api_url: str) -> list[dict[str, Any]]:
     resp = httpx.get(
         f"{api_url.rstrip('/')}/policy/modules",
@@ -277,23 +271,6 @@ def _list_policy_modules(api_url: str) -> list[dict[str, Any]]:
 
 def _hotfix_exists(api_url: str, module_path: str = HOTFIX_MODULE_PATH) -> bool:
     return any(item.get("path") == module_path for item in _list_policy_modules(api_url))
-
-
-def _cleanup_hotfix_module(api_url: str, module_path: str = HOTFIX_MODULE_PATH) -> None:
-    if not _hotfix_exists(api_url, module_path):
-        return
-    resp = httpx.request(
-        "DELETE",
-        f"{api_url.rstrip('/')}/policy/modules",
-        headers=_auth_headers(),
-        json={
-            "module_path": module_path,
-            "commit_message": "Cleanup benchmark cache failover hotfix",
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-
 
 def _fetch_hotfix_module(api_url: str, module_path: str = HOTFIX_MODULE_PATH) -> dict[str, Any] | None:
     if not _hotfix_exists(api_url, module_path):
@@ -336,13 +313,19 @@ def _hotfix_snapshot_from_record(record: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def _is_valid_hotfix_snapshot(snapshot: dict[str, Any]) -> bool:
-    if snapshot.get("module_path") != HOTFIX_MODULE_PATH:
+def _is_valid_hotfix_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    module_path: str,
+    package_name: str,
+    summary_token: str,
+) -> bool:
+    if snapshot.get("module_path") != module_path:
         return False
     if snapshot.get("action") not in {"created", "updated"}:
         return False
     rego = str(snapshot.get("rego_content", "") or "")
-    return HOTFIX_PACKAGE in rego and HOTFIX_SUMMARY_TOKEN in rego
+    return package_name in rego and summary_token in rego
 
 
 def _wait_for_hotfix_module(
@@ -448,14 +431,14 @@ def _kubectl_base(kube_context: str | None) -> list[str]:
     return cmd
 
 
-def _client_pod(namespace: str, kube_context: str | None) -> str:
+def _client_pod(namespace: str, kube_context: str | None, app_name: str = "opal-client-authz-a") -> str:
     cmd = _kubectl_base(kube_context) + [
         "-n",
         namespace,
         "get",
         "pods",
         "-l",
-        "app.kubernetes.io/name=opal-client-authz-a",
+        f"app.kubernetes.io/name={app_name}",
         "-o",
         "jsonpath={.items[0].metadata.name}",
     ]
@@ -463,11 +446,17 @@ def _client_pod(namespace: str, kube_context: str | None) -> str:
     return result.stdout.strip()
 
 
-def _hotfix_visible_on_client(namespace: str, kube_context: str | None) -> bool:
-    pod = _client_pod(namespace, kube_context)
+def _hotfix_visible_on_client(
+    namespace: str,
+    kube_context: str | None,
+    *,
+    module_path: str,
+    package_name: str,
+) -> bool:
+    pod = _client_pod(namespace, kube_context, "opal-client-authz-a")
     script = (
         "import sys, urllib.request, urllib.error\n"
-        "url='http://127.0.0.1:8181/v1/policies/incident/cache_failover_hotfix.rego'\n"
+        "url='http://127.0.0.1:8181/v1/policies/' + sys.argv[1]\n"
         "try:\n"
         "    data = urllib.request.urlopen(url, timeout=10).read().decode('utf-8')\n"
         "    sys.stdout.write(data)\n"
@@ -485,10 +474,11 @@ def _hotfix_visible_on_client(namespace: str, kube_context: str | None) -> bool:
         "python",
         "-c",
         script,
+        module_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode == 0:
-        return HOTFIX_PACKAGE in result.stdout
+        return package_name in result.stdout
     if result.returncode == 10:
         return False
     raise RuntimeError(result.stderr.strip() or result.stdout.strip())
@@ -498,13 +488,88 @@ def _wait_for_client_hotfix(
     namespace: str,
     kube_context: str | None,
     *,
+    module_path: str,
+    package_name: str,
     expect_present: bool,
     timeout_seconds: int = 120,
 ) -> bool:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        visible = _hotfix_visible_on_client(namespace, kube_context)
+        visible = _hotfix_visible_on_client(
+            namespace,
+            kube_context,
+            module_path=module_path,
+            package_name=package_name,
+        )
         if visible == expect_present:
+            return True
+        time.sleep(3)
+    return False
+
+
+def _client_decision(
+    namespace: str,
+    kube_context: str | None,
+    *,
+    client_app: str,
+    package_path: str,
+    input_payload: dict[str, Any],
+) -> tuple[bool, bool]:
+    pod = _client_pod(namespace, kube_context, client_app)
+    script = (
+        "import json, sys, urllib.error, urllib.request\n"
+        "req = urllib.request.Request(\n"
+        "    'http://127.0.0.1:8181/v1/data/' + sys.argv[1],\n"
+        "    data=json.dumps({'input': json.loads(sys.argv[2])}).encode('utf-8'),\n"
+        "    headers={'Content-Type': 'application/json'},\n"
+        ")\n"
+        "try:\n"
+        "    print(urllib.request.urlopen(req, timeout=10).read().decode('utf-8'))\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    print(json.dumps({'http_error': exc.code, 'body': exc.read().decode('utf-8')}))\n"
+    )
+    cmd = _kubectl_base(kube_context) + [
+        "-n",
+        namespace,
+        "exec",
+        pod,
+        "--",
+        "python",
+        "-c",
+        script,
+        package_path,
+        json.dumps(input_payload),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    data = json.loads(result.stdout.strip())
+    if "http_error" in data:
+        return False, False
+    value = data.get("result")
+    return bool(value is not None), bool(value)
+
+
+def _wait_for_client_decision(
+    namespace: str,
+    kube_context: str | None,
+    *,
+    client_app: str,
+    package_path: str,
+    input_payload: dict[str, Any],
+    expect_value: bool,
+    timeout_seconds: int = 120,
+) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        _, value = _client_decision(
+            namespace,
+            kube_context,
+            client_app=client_app,
+            package_path=package_path,
+            input_payload=input_payload,
+        )
+        if value == expect_value:
             return True
         time.sleep(3)
     return False
@@ -518,6 +583,8 @@ def run_test(args: argparse.Namespace) -> bool:
         print(f"  {FAIL}  {exc}")
         return False
 
+    scenario = get_goex_scenario(args.case)
+    task = args.task or scenario.task
     default_models = {
         "anthropic": "haiku",
         "gemini": "gemini-2.5-flash",
@@ -538,15 +605,16 @@ def run_test(args: argparse.Namespace) -> bool:
     print(f"  {PASS}  healthcheck ok")
 
     try:
-        _cleanup_hotfix_module(api_url)
+        reset = _reset_benchmark_state(api_url)
     except Exception as exc:
-        print(f"  {FAIL}  could not clean previous hotfix state: {exc}")
+        print(f"  {FAIL}  could not reset benchmark state: {exc}")
         return False
+    print(f"  {PASS}  benchmark reset ok: {json.dumps(reset, ensure_ascii=True)}")
 
     print(
-        f"\n[2/5] Running agent (level={args.level}, execution_mode={args.execution_mode})..."
+        f"\n[2/5] Running agent (case={args.case}, level={args.level}, execution_mode={args.execution_mode})..."
     )
-    print(f"  Task: {args.task[:200]}...\n" if len(args.task) > 200 else f"  Task: {args.task}\n")
+    print(f"  Task: {task[:200]}...\n" if len(task) > 200 else f"  Task: {task}\n")
 
     record_ids: list[str] = []
     hotfix_snapshots: list[dict[str, Any]] = []
@@ -559,7 +627,7 @@ def run_test(args: argparse.Namespace) -> bool:
         provider=args.provider,
         model=model,
         reasoning=not args.no_reasoning,
-        task=args.task,
+        task=task,
         mcp_url=args.mcp_url,
         codegen_provider=args.codegen_provider,
         benchmark_label=args.benchmark_label,
@@ -593,7 +661,7 @@ def run_test(args: argparse.Namespace) -> bool:
             system_prompt = DIRECT_SYSTEM_PROMPT
         asyncio.run(
             runner.run(
-                args.task,
+                task,
                 level=args.level,
                 execution_mode=args.execution_mode,
                 system_prompt=system_prompt,
@@ -613,59 +681,103 @@ def run_test(args: argparse.Namespace) -> bool:
     action = last.get("action")
 
     if args.execution_mode != "goex":
-        module = _wait_for_hotfix_module(api_url)
+        module = _wait_for_hotfix_module(api_url, scenario.module_path)
         if module is None:
-            print(f"  {FAIL}  Hotfix module {HOTFIX_MODULE_PATH} was not found after execution.")
+            print(f"  {FAIL}  Hotfix module {scenario.module_path} was not found after execution.")
             return False
         rego = module.get("rego", "")
-        if HOTFIX_PACKAGE not in rego or HOTFIX_SUMMARY_TOKEN not in rego:
+        if scenario.package_name not in rego or scenario.summary_token not in rego:
             print(
                 f"  {FAIL}  Hotfix module content did not contain expected markers. "
-                f"package={HOTFIX_PACKAGE!r}, token={HOTFIX_SUMMARY_TOKEN!r}"
+                f"package={scenario.package_name!r}, token={scenario.summary_token!r}"
             )
             return False
         print(
-            f"  {PASS}  hotfix module present with package {HOTFIX_PACKAGE} "
+            f"  {PASS}  hotfix module present with package {scenario.package_name} "
             f"(action={action or 'unknown'})"
         )
         if args.namespace:
-            print("\n[3b/5] Checking hotfix on opal-client-authz-a...")
-            try:
-                propagated = _wait_for_client_hotfix(
-                    args.namespace,
-                    args.kube_context,
-                    expect_present=True,
-                )
-            except Exception as exc:
-                print(f"  {FAIL}  client verification failed: {exc}")
-                return False
-            if not propagated:
-                print(f"  {FAIL}  hotfix never reached opal-client-authz-a.")
-                return False
-            print(f"  {PASS}  hotfix propagated to opal-client-authz-a")
+            if scenario.decision_check is not None:
+                print(f"\n[3b/5] Checking decision on {scenario.decision_check.client_app}...")
+                try:
+                    propagated = _wait_for_client_decision(
+                        args.namespace,
+                        args.kube_context,
+                        client_app=scenario.decision_check.client_app,
+                        package_path=scenario.decision_check.package_path,
+                        input_payload=scenario.decision_check.positive_input,
+                        expect_value=True,
+                    )
+                    _, negative = _client_decision(
+                        args.namespace,
+                        args.kube_context,
+                        client_app=scenario.decision_check.client_app,
+                        package_path=scenario.decision_check.package_path,
+                        input_payload=scenario.decision_check.negative_input,
+                    )
+                except Exception as exc:
+                    print(f"  {FAIL}  client verification failed: {exc}")
+                    return False
+                if not propagated or negative:
+                    print(f"  {FAIL}  client decision did not converge to the expected state.")
+                    return False
+                print(f"  {PASS}  outage decision propagated to {scenario.decision_check.client_app}")
+            elif scenario.expect_module_presence:
+                print("\n[3b/5] Checking hotfix on opal-client-authz-a...")
+                try:
+                    propagated = _wait_for_client_hotfix(
+                        args.namespace,
+                        args.kube_context,
+                        module_path=scenario.module_path,
+                        package_name=scenario.package_name,
+                        expect_present=True,
+                    )
+                except Exception as exc:
+                    print(f"  {FAIL}  client verification failed: {exc}")
+                    return False
+                if not propagated:
+                    print(f"  {FAIL}  hotfix never reached opal-client-authz-a.")
+                    return False
+                print(f"  {PASS}  hotfix propagated to opal-client-authz-a")
 
         try:
-            _cleanup_hotfix_module(api_url)
+            _reset_benchmark_state(api_url)
         except Exception as exc:
             print(f"  {FAIL}  direct-mode cleanup failed: {exc}")
             return False
-        if _hotfix_exists(api_url):
-            print(f"  {FAIL}  cleanup did not remove {HOTFIX_MODULE_PATH}.")
-            return False
         if args.namespace:
-            try:
-                cleared = _wait_for_client_hotfix(
-                    args.namespace,
-                    args.kube_context,
-                    expect_present=False,
-                )
-            except Exception as exc:
-                print(f"  {FAIL}  client cleanup verification failed: {exc}")
-                return False
-            if not cleared:
-                print(f"  {FAIL}  hotfix still visible on opal-client-authz-a after cleanup.")
-                return False
-        print(f"  {PASS}  L0 baseline created the hotfix and cleanup restored the repo.")
+            if scenario.decision_check is not None:
+                try:
+                    cleared = _wait_for_client_decision(
+                        args.namespace,
+                        args.kube_context,
+                        client_app=scenario.decision_check.client_app,
+                        package_path=scenario.decision_check.package_path,
+                        input_payload=scenario.decision_check.positive_input,
+                        expect_value=False,
+                    )
+                except Exception as exc:
+                    print(f"  {FAIL}  client cleanup verification failed: {exc}")
+                    return False
+                if not cleared:
+                    print(f"  {FAIL}  outage decision did not return to the baseline state.")
+                    return False
+            elif scenario.expect_module_presence:
+                try:
+                    cleared = _wait_for_client_hotfix(
+                        args.namespace,
+                        args.kube_context,
+                        module_path=scenario.module_path,
+                        package_name=scenario.package_name,
+                        expect_present=False,
+                    )
+                except Exception as exc:
+                    print(f"  {FAIL}  client cleanup verification failed: {exc}")
+                    return False
+                if not cleared:
+                    print(f"  {FAIL}  hotfix still visible on opal-client-authz-a after cleanup.")
+                    return False
+        print(f"  {PASS}  L0 baseline created the change and reset restored the repo.")
         print("\n[4/5] Skipping GoEx (direct mode).")
         print("\n[5/5] Skipping reversal (direct mode).")
         return True
@@ -701,25 +813,30 @@ def run_test(args: argparse.Namespace) -> bool:
             return False
     record_snapshot = _hotfix_snapshot_from_record(fetched_records[-1])
     effective_snapshot = record_snapshot or last
-    if not _is_valid_hotfix_snapshot(effective_snapshot):
+    if not _is_valid_hotfix_snapshot(
+        effective_snapshot,
+        module_path=scenario.module_path,
+        package_name=scenario.package_name,
+        summary_token=scenario.summary_token,
+    ):
         print(
             f"  {FAIL}  GoEx hotfix result did not contain the expected module details. "
             f"Snapshot: {json.dumps(effective_snapshot, indent=2)[:1200]}"
         )
         return False
     action = effective_snapshot.get("action")
-    module = _wait_for_hotfix_module(api_url)
+    module = _wait_for_hotfix_module(api_url, scenario.module_path)
     if module is None:
         print(
-            f"  {PASS}  GoEx record captured a valid hotfix for {HOTFIX_MODULE_PATH} "
+            f"  {PASS}  GoEx record captured a valid hotfix for {scenario.module_path} "
             f"(action={action or 'unknown'}); admin API did not reflect it within the bounded readback window."
         )
     else:
         rego = module.get("rego", "")
-        if HOTFIX_PACKAGE not in rego or HOTFIX_SUMMARY_TOKEN not in rego:
+        if scenario.package_name not in rego or scenario.summary_token not in rego:
             print(
-                f"  {FAIL}  Admin API returned {HOTFIX_MODULE_PATH}, but it did not contain expected markers. "
-                f"package={HOTFIX_PACKAGE!r}, token={HOTFIX_SUMMARY_TOKEN!r}"
+                f"  {FAIL}  Admin API returned {scenario.module_path}, but it did not contain expected markers. "
+                f"package={scenario.package_name!r}, token={scenario.summary_token!r}"
             )
             return False
         print(
@@ -727,20 +844,48 @@ def run_test(args: argparse.Namespace) -> bool:
             f"(action={action or 'unknown'})"
         )
     if args.namespace:
-        print("\n[4b/5] Checking hotfix on opal-client-authz-a...")
-        try:
-            propagated = _wait_for_client_hotfix(
-                args.namespace,
-                args.kube_context,
-                expect_present=True,
-            )
-        except Exception as exc:
-            print(f"  {FAIL}  client verification failed: {exc}")
-            return False
-        if not propagated:
-            print(f"  {FAIL}  hotfix never reached opal-client-authz-a.")
-            return False
-        print(f"  {PASS}  hotfix propagated to opal-client-authz-a")
+        if scenario.decision_check is not None:
+            print(f"\n[4b/5] Checking decision on {scenario.decision_check.client_app}...")
+            try:
+                propagated = _wait_for_client_decision(
+                    args.namespace,
+                    args.kube_context,
+                    client_app=scenario.decision_check.client_app,
+                    package_path=scenario.decision_check.package_path,
+                    input_payload=scenario.decision_check.positive_input,
+                    expect_value=True,
+                )
+                _, negative = _client_decision(
+                    args.namespace,
+                    args.kube_context,
+                    client_app=scenario.decision_check.client_app,
+                    package_path=scenario.decision_check.package_path,
+                    input_payload=scenario.decision_check.negative_input,
+                )
+            except Exception as exc:
+                print(f"  {FAIL}  client verification failed: {exc}")
+                return False
+            if not propagated or negative:
+                print(f"  {FAIL}  outage decision did not converge to the expected state.")
+                return False
+            print(f"  {PASS}  outage decision propagated to {scenario.decision_check.client_app}")
+        elif scenario.expect_module_presence:
+            print("\n[4b/5] Checking hotfix on opal-client-authz-a...")
+            try:
+                propagated = _wait_for_client_hotfix(
+                    args.namespace,
+                    args.kube_context,
+                    module_path=scenario.module_path,
+                    package_name=scenario.package_name,
+                    expect_present=True,
+                )
+            except Exception as exc:
+                print(f"  {FAIL}  client verification failed: {exc}")
+                return False
+            if not propagated:
+                print(f"  {FAIL}  hotfix never reached opal-client-authz-a.")
+                return False
+            print(f"  {PASS}  hotfix propagated to opal-client-authz-a")
 
     print(f"\n[5/5] Reversing {len(record_ids)} record(s)...")
     for rid in record_ids:
@@ -755,22 +900,41 @@ def run_test(args: argparse.Namespace) -> bool:
             print(f"  {FAIL}  reverse failed for {rid[:8]}…: {exc}")
             return False
 
-    if _hotfix_exists(api_url):
+    if scenario.decision_check is None and _hotfix_exists(api_url, scenario.module_path):
         print(f"  {FAIL}  Hotfix module still exists after reversal.")
         return False
     if args.namespace:
-        try:
-            cleared = _wait_for_client_hotfix(
-                args.namespace,
-                args.kube_context,
-                expect_present=False,
-            )
-        except Exception as exc:
-            print(f"  {FAIL}  client reversal verification failed: {exc}")
-            return False
-        if not cleared:
-            print(f"  {FAIL}  hotfix still visible on opal-client-authz-a after reversal.")
-            return False
+        if scenario.decision_check is not None:
+            try:
+                cleared = _wait_for_client_decision(
+                    args.namespace,
+                    args.kube_context,
+                    client_app=scenario.decision_check.client_app,
+                    package_path=scenario.decision_check.package_path,
+                    input_payload=scenario.decision_check.positive_input,
+                    expect_value=False,
+                )
+            except Exception as exc:
+                print(f"  {FAIL}  client reversal verification failed: {exc}")
+                return False
+            if not cleared:
+                print(f"  {FAIL}  outage decision did not return to the baseline state after reversal.")
+                return False
+        elif scenario.expect_module_presence:
+            try:
+                cleared = _wait_for_client_hotfix(
+                    args.namespace,
+                    args.kube_context,
+                    module_path=scenario.module_path,
+                    package_name=scenario.package_name,
+                    expect_present=False,
+                )
+            except Exception as exc:
+                print(f"  {FAIL}  client reversal verification failed: {exc}")
+                return False
+            if not cleared:
+                print(f"  {FAIL}  hotfix still visible on opal-client-authz-a after reversal.")
+                return False
     print(f"  {PASS}  All reversals succeeded.")
     return True
 
@@ -801,6 +965,11 @@ def main() -> None:
         default="L1",
     )
     parser.add_argument(
+        "--case",
+        choices=["current", "test1", "test3"],
+        default="current",
+    )
+    parser.add_argument(
         "--provider",
         choices=["ollama", "anthropic", "gemini", "llmgateway", "copilot", "agent"],
         default="anthropic",
@@ -819,7 +988,7 @@ def main() -> None:
         default="direct",
         help="L0: direct (no GoEx). L1-L4 with goex: use --execution-mode goex",
     )
-    parser.add_argument("--task", default=DEFAULT_TASK)
+    parser.add_argument("--task", default=None)
     parser.add_argument("--export-stats", metavar="FILE", default=None)
     parser.add_argument("--benchmark-label", metavar="LABEL", default=None)
     parser.add_argument("--benchmark-final-json-key", metavar="KEY", default=None)
