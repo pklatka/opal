@@ -656,7 +656,9 @@ def run_test(args: argparse.Namespace) -> bool:
     try:
         system_prompt = None
         if args.execution_mode == "goex":
-            system_prompt = GOEX_SYSTEM_PROMPTS.get(args.level)
+            base_prompt = GOEX_SYSTEM_PROMPTS.get(args.level)
+            if base_prompt is not None:
+                system_prompt = base_prompt
         elif args.level == "L0":
             system_prompt = DIRECT_SYSTEM_PROMPT
         asyncio.run(

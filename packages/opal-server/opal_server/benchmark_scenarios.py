@@ -166,7 +166,22 @@ Requirements:
   - input.request.operation == "cache_failover"
 
 If the module already exists, replace it with the corrected hotfix. End with a short operator-facing summary.""",
-        expect_module_presence=True,
+        decision_check=DecisionCheck(
+            client_app="opal-client-authz-a",
+            package_path="app/incident/cache_failover_hotfix/allow",
+            positive_input={
+                "incident": {"severity": "sev-1"},
+                "actor": {"class": "oncall_responder"},
+                "flags": {"emergency_override": True},
+                "request": {"operation": "cache_failover"},
+            },
+            negative_input={
+                "incident": {"severity": "sev-1"},
+                "actor": {"class": "oncall_responder"},
+                "flags": {"emergency_override": False},
+                "request": {"operation": "cache_failover"},
+            },
+        ),
     ),
     "test1": GoexScenario(
         case_id="test1",

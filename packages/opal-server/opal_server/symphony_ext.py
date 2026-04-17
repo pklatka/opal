@@ -508,26 +508,21 @@ def set_policy_bundle_context_provider(repo_getter):
 
     def _hotfix_provider() -> dict:
         repo = repo_getter()
-        module_path = os.getenv(
-            "OPAL_POLICY_HOTFIX_DEFAULT_MODULE_PATH",
-            "incident/cache_failover_hotfix.rego",
-        )
-        commit_message = os.getenv(
-            "OPAL_POLICY_HOTFIX_DEFAULT_COMMIT_MESSAGE",
-            "Apply emergency cache failover hotfix",
-        )
         context = _bundle_context(repo)
-        current_rego = None
-        if repo is not None and len(repo.heads) != 0:
-            current_rego = read_policy_module_from_repo(repo, module_path)
         context.update(
             {
                 "repo_path": repo.working_dir if repo is not None else "",
-                "module_path": module_path,
-                "commit_message": commit_message,
+                "module_path": os.getenv(
+                    "OPAL_POLICY_HOTFIX_DEFAULT_MODULE_PATH",
+                    "incident/cache_failover_hotfix.rego",
+                ),
+                "commit_message": os.getenv(
+                    "OPAL_POLICY_HOTFIX_DEFAULT_COMMIT_MESSAGE",
+                    "Apply emergency cache failover hotfix",
+                ),
                 "requested_rego": None,
-                "current_rego": current_rego,
-                "module_exists_before": current_rego is not None,
+                "current_rego": None,
+                "module_exists_before": False,
             }
         )
         return context
