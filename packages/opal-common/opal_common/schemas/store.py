@@ -11,9 +11,13 @@ class TransactionType(str, Enum):
 
 
 class RemoteStatus(BaseModel):
-    remote_url: str = Field(None, description="Url of remote data/policy source")
+    remote_url: Optional[str] = Field(
+        None, description="Url of remote data/policy source"
+    )
     succeed: bool = Field(True, description="Is request succeed")
-    error: str = Field(None, description="If failed contains the type of exception")
+    error: Optional[str] = Field(
+        None, description="If failed contains the type of exception"
+    )
 
 
 class StoreTransaction(BaseModel):
@@ -29,14 +33,16 @@ class StoreTransaction(BaseModel):
     success: bool = Field(
         False, description="Whether or not the transaction was successful"
     )
-    error: str = Field(
+    error: Optional[str] = Field(
         "", description="Error message in case of failure, defaults to empty string"
     )
-    creation_time: str = Field(
+    creation_time: Optional[str] = Field(
         None, description="Creation time for this store transaction"
     )
-    end_time: str = Field(None, description="Finish time for this store transaction")
-    remotes_status: List[RemoteStatus] = Field(
+    end_time: Optional[str] = Field(
+        None, description="Finish time for this store transaction"
+    )
+    remotes_status: Optional[List[RemoteStatus]] = Field(
         None,
         description="List of the remote sources for this transaction and their status",
     )

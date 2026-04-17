@@ -6,7 +6,7 @@ import traceback
 from functools import partial
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi_websocket_pubsub.event_broadcaster import EventBroadcasterContextManager
 from opal_common.authentication.deps import JWTAuthenticator, StaticBearerAuthenticator
 from opal_common.authentication.signer import JWTSigner
@@ -15,7 +15,7 @@ from opal_common.config import opal_common_config
 from opal_common.logger import configure_logs, logger
 from opal_common.middleware import configure_middleware
 from opal_common.monitoring import apm, metrics
-from opal_common.schemas.data import ServerDataSourceConfig
+from opal_common.schemas.data import DataSourceEntry, DataUpdate, ServerDataSourceConfig
 from opal_common.synchronization.named_lock import NamedLock
 from opal_common.topics.publisher import (
     PeriodicPublisher,
@@ -43,9 +43,9 @@ from opal_server.statistics import OpalStatistics, init_statistics_router
 from opal_server.symphony_ext import (
     extension_registry as symphony_registry,
     goex_registry as symphony_goex_registry,
-    SYSTEM_PROMPTS as symphony_prompts,
 )
-from symphony import mount_symphony
+from opal_server.policy.module_ops import delete_policy_module as delete_policy_module_from_repo
+from symphony import SYSTEM_PROMPTS as symphony_prompts, mount_symphony
 
 
 def _create_codegen_provider():
@@ -245,6 +245,21 @@ class OpalServer:
             version="0.1.0",
         )
 
+        # Codegen websocket: allows a remote agent_cli to act as a code-generation
+        # worker for L2/L3/L4 server-side extensions.  The route MUST be registered
+        # before any HTTP routes or middleware because Starlette matches routes in
+        # registration order — if an HTTP route is registered first, Starlette will
+        # match it for the /symphony/codegen/ws path and reject the WebSocket
+        # upgrade with a 403.  mount_symphony() also registers this route, but it
+        # runs after all HTTP endpoints are defined, which is too late.
+        from fastapi import WebSocket as _WebSocket
+
+        @app.websocket("/symphony/codegen/ws")
+        async def symphony_codegen_worker(websocket: _WebSocket):
+            from symphony.providers.websocket_codegen import get_codegen_broker
+            broker = get_codegen_broker()
+            await broker.register_fastapi_worker(websocket)
+
         configure_middleware(app)
         self._configure_api_routes(app)
         self._configure_lifecycle_callbacks(app)
@@ -339,6 +354,86 @@ class OpalServer:
         @app.get("/", include_in_schema=False)
         def root():
             return {"status": "ok"}
+
+        @app.post(
+            "/symphony/benchmark/reset",
+            tags=["Symphony"],
+            dependencies=[Depends(authenticator)],
+        )
+        async def benchmark_reset():
+            """Restore OPAL benchmark state between standard benchmark jobs."""
+            if data_update_publisher is None:
+                raise HTTPException(status_code=503, detail="data update publisher unavailable")
+
+            reset_entries = [
+                DataSourceEntry(
+                    url="http://opal-benchmark-data:8081/v1/bootstrap/incident_access",
+                    topics=["incident_access"],
+                    dst_path="/incident/access",
+                    save_method="PUT",
+                    data={},
+                ),
+                DataSourceEntry(
+                    url="http://opal-benchmark-data:8081/v1/bootstrap/directory_sync",
+                    topics=["directory_sync"],
+                    dst_path="/directory/emergency/groups",
+                    save_method="PUT",
+                    data={"groups": [], "source": "benchmark-reset"},
+                ),
+                DataSourceEntry(
+                    url="http://opal-benchmark-data:8081/v1/bootstrap/feature_flags",
+                    topics=["feature_flags"],
+                    dst_path="/feature_flags/cache_failover",
+                    save_method="PUT",
+                    data={"flag": "cache_failover", "enabled": False, "rollout": "benchmark-reset"},
+                ),
+                DataSourceEntry(
+                    url="http://opal-benchmark-data:8081/v1/bootstrap/audit_logs",
+                    topics=["audit_logs"],
+                    dst_path="/audit/incident/raw",
+                    save_method="PUT",
+                    data={},
+                ),
+            ]
+            await data_update_publisher.publish_data_updates(
+                DataUpdate(
+                    reason="Restore OPAL benchmark baseline",
+                    entries=reset_entries,
+                )
+            )
+
+            hotfix_removed = False
+            hotfix_missing = False
+            try:
+                repo = _get_repo_or_none(opal_server_config)
+                if repo is None:
+                    hotfix_missing = True
+                else:
+                    delete_policy_module_from_repo(
+                        repo,
+                        "incident/cache_failover_hotfix.rego",
+                        "Cleanup benchmark hotfix during reset",
+                        missing_ok=True,
+                    )
+                    hotfix_removed = True
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"benchmark reset failed to clean hotfix: {exc!s}",
+                ) from exc
+
+            return {
+                "ok": True,
+                "reason": "Restore OPAL benchmark baseline",
+                "paths_reset": [
+                    "/incident/access",
+                    "/directory/emergency/groups",
+                    "/feature_flags/cache_failover",
+                    "/audit/incident/raw",
+                ],
+                "hotfix_removed": hotfix_removed,
+                "hotfix_missing": hotfix_missing,
+            }
 
         # Register Symphony context providers for L4 code_extension
         from opal_server.symphony_ext import (

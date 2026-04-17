@@ -6,6 +6,7 @@ Symphony's extension framework into the OPAL server.
 
 Extension points:
   - post_policy_bundle: filter/transform policy bundles before serving
+  - policy_hotfix:      create/update/delete emergency policy modules via Git
   - post_data_update:   validate/transform data update entries before publishing
   - post_statistics:    aggregate/alert on server statistics before returning
 
@@ -16,6 +17,9 @@ Capabilities are grouped into classes whose methods are decorated with
 from __future__ import annotations
 
 import os
+import re
+
+from git.repo import Repo
 
 from symphony import (
     ExtensionPoint,
@@ -23,9 +27,15 @@ from symphony import (
     GoExRegistry,
     collect_capabilities,
     capability,
-    SYSTEM_PROMPTS,
 )
 from symphony.sandbox import set_default_executor, PythonSandboxExecutor
+from opal_server.policy.module_ops import (
+    PolicyModulePathError,
+    delete_policy_module as delete_policy_module_from_repo,
+    module_exists as module_exists_in_repo,
+    read_policy_module as read_policy_module_from_repo,
+    upsert_policy_module as upsert_policy_module_in_repo,
+)
 
 # ---------------------------------------------------------------------------
 # Sandbox — use PythonSandboxExecutor (in-process, no external deps needed)
@@ -85,7 +95,18 @@ class PolicyBundleCapabilities:
     @capability(name="get_package_names")
     def get_package_names(self, modules: list[dict]) -> list[str]:
         """Extract all unique package names from a list of policy modules."""
-        return sorted({m.get("package_name", "") for m in modules if m.get("package_name")})
+        package_re = re.compile(r"(?m)^\s*package\s+([A-Za-z0-9_.]+)\s*$")
+        packages: set[str] = set()
+        for module in modules:
+            package_name = str(module.get("package_name", "") or "").strip()
+            if not package_name:
+                rego = str(module.get("rego", "") or "")
+                match = package_re.search(rego)
+                if match:
+                    package_name = match.group(1)
+            if package_name:
+                packages.add(package_name)
+        return sorted(packages)
 
     @capability(name="exclude_test_modules")
     def exclude_test_modules(self, modules: list[dict]) -> list[dict]:
@@ -101,6 +122,70 @@ class PolicyBundleCapabilities:
     def exclude_modules_by_suffix(self, modules: list[dict], suffix: str) -> list[dict]:
         """Exclude modules whose path ends with the given suffix (e.g. '_dev.rego')."""
         return [m for m in modules if not m.get("path", "").endswith(suffix)]
+
+
+def _repo_from_path(repo_path: str) -> Repo:
+    if not repo_path:
+        raise RuntimeError("repo_path is required")
+    return Repo(repo_path)
+
+
+class PolicyHotfixCapabilities:
+    """Capabilities for emergency policy hotfix mutations."""
+
+    @capability(name="read_policy_module")
+    def read_policy_module(self, repo_path: str, module_path: str) -> str | None:
+        """Read a Rego module from the tracked policy clone."""
+        try:
+            return read_policy_module_from_repo(_repo_from_path(repo_path), module_path)
+        except (PolicyModulePathError, ValueError, FileNotFoundError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @capability(name="module_exists")
+    def module_exists(self, repo_path: str, module_path: str) -> bool:
+        """Check whether a module exists in the tracked policy clone."""
+        try:
+            return module_exists_in_repo(_repo_from_path(repo_path), module_path)
+        except (PolicyModulePathError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @capability(name="upsert_policy_module", mutates=True)
+    def upsert_policy_module(
+        self,
+        repo_path: str,
+        module_path: str,
+        rego_content: str,
+        commit_message: str,
+    ) -> dict:
+        """Create or replace a Rego module and commit it."""
+        try:
+            return upsert_policy_module_in_repo(
+                _repo_from_path(repo_path),
+                module_path,
+                rego_content,
+                commit_message,
+            )
+        except (PolicyModulePathError, ValueError, FileNotFoundError) as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    @capability(name="delete_policy_module", mutates=True)
+    def delete_policy_module(
+        self,
+        repo_path: str,
+        module_path: str,
+        commit_message: str = "Delete policy module",
+        missing_ok: bool = False,
+    ) -> dict:
+        """Delete a Rego module and commit the removal."""
+        try:
+            return delete_policy_module_from_repo(
+                _repo_from_path(repo_path),
+                module_path,
+                commit_message,
+                missing_ok=missing_ok,
+            )
+        except (PolicyModulePathError, ValueError, FileNotFoundError) as exc:
+            raise RuntimeError(str(exc)) from exc
 
 
 class DataUpdateCapabilities:
@@ -126,11 +211,11 @@ class DataUpdateCapabilities:
 
     @capability(name="deduplicate_entries")
     def deduplicate_entries(self, entries: list[dict]) -> list[dict]:
-        """Remove duplicate entries (by url + dst_path combination)."""
+        """Remove duplicate entries by (topics + dst_path), keeping the first."""
         seen: set[tuple] = set()
         result = []
         for e in entries:
-            key = (e.get("url", ""), e.get("dst_path", ""))
+            key = (tuple(sorted(e.get("topics", []))), e.get("dst_path", ""))
             if key not in seen:
                 seen.add(key)
                 result.append(e)
@@ -170,6 +255,14 @@ class DataUpdateCapabilities:
 class StatisticsCapabilities:
     """Capabilities for working with server statistics in extension code."""
 
+    @staticmethod
+    def _visible_topics(channel: dict) -> list[str]:
+        return [
+            topic
+            for topic in (channel.get("topics", []) or [])
+            if isinstance(topic, str) and not topic.startswith("policy:.")
+        ]
+
     @capability(name="get_client_list")
     def get_client_list(self, stats: dict) -> list[dict]:
         """Extract the flat list of all client records from statistics."""
@@ -177,10 +270,13 @@ class StatisticsCapabilities:
         result = []
         for client_id, channels in clients.items():
             for ch in channels:
+                topics = self._visible_topics(ch)
+                if not topics:
+                    continue
                 result.append({
                     "client_id": client_id,
                     "rpc_id": ch.get("rpc_id", ""),
-                    "topics": ch.get("topics", []),
+                    "topics": topics,
                 })
         return result
 
@@ -191,7 +287,7 @@ class StatisticsCapabilities:
         result = set()
         for client_id, channels in clients.items():
             for ch in channels:
-                if topic in ch.get("topics", []):
+                if topic in self._visible_topics(ch):
                     result.add(client_id)
         return sorted(result)
 
@@ -202,7 +298,7 @@ class StatisticsCapabilities:
         topic_counts: dict[str, set] = {}
         for client_id, channels in clients.items():
             for ch in channels:
-                for topic in ch.get("topics", []):
+                for topic in self._visible_topics(ch):
                     topic_counts.setdefault(topic, set()).add(client_id)
         return {t: len(cids) for t, cids in topic_counts.items()}
 
@@ -228,10 +324,12 @@ class StatisticsCapabilities:
 # ---------------------------------------------------------------------------
 
 policy_bundle_caps = PolicyBundleCapabilities()
+policy_hotfix_caps = PolicyHotfixCapabilities()
 data_update_caps = DataUpdateCapabilities()
 statistics_caps = StatisticsCapabilities()
 
 _policy_capabilities = list(collect_capabilities(policy_bundle_caps))
+_policy_hotfix_capabilities = list(collect_capabilities(policy_hotfix_caps))
 _data_update_capabilities = list(collect_capabilities(data_update_caps))
 _statistics_capabilities = list(collect_capabilities(statistics_caps))
 
@@ -246,6 +344,10 @@ goex_registry = GoExRegistry(auto_approve=False, auto_approve_readonly=True)
 
 def _validate_non_empty_bundle(record) -> bool:
     """GoEx validator: reject if policy bundle has zero modules."""
+    metadata = record.metadata or {}
+    endpoint = metadata.get("endpoint")
+    if endpoint not in {"/policy", "/policy/"}:
+        return True
     if record.result and record.result.get("success"):
         result_value = record.result.get("result")
         if isinstance(result_value, dict):
@@ -277,6 +379,24 @@ post_policy_bundle = extension_registry.register(
             "in the policy bundle request"
         ),
         capabilities=list(_policy_capabilities),
+        codegen_provider=_create_codegen_provider(),
+    )
+)
+
+policy_hotfix = extension_registry.register(
+    ExtensionPoint(
+        name="policy_hotfix",
+        description=(
+            "Mutating hook for emergency policy hotfixes. Extension code can "
+            "inspect the tracked Git clone, generate or revise a single Rego "
+            "module, and commit the resulting change as a guarded control-plane "
+            "operation."
+        ),
+        trigger_description=(
+            "Runs when code_extension targets the policy_hotfix extension point "
+            "and executes code against the tracked policy repository context"
+        ),
+        capabilities=list(_policy_hotfix_capabilities),
         codegen_provider=_create_codegen_provider(),
     )
 )
@@ -349,11 +469,17 @@ def set_policy_bundle_context_provider(repo_getter):
     from opal_server.config import opal_server_config
     from pathlib import Path
 
-    def _provider() -> dict:
-        repo = repo_getter()
+    def _bundle_context(repo: Repo) -> dict:
         if repo is None or len(repo.heads) == 0:
-            return {"policy_modules": [], "modules": [], "data_modules": [],
-                    "manifest": [], "hash": "", "module_count": 0, "data_module_count": 0}
+            return {
+                "policy_modules": [],
+                "modules": [],
+                "data_modules": [],
+                "manifest": [],
+                "hash": "",
+                "module_count": 0,
+                "data_module_count": 0,
+            }
         maker = BundleMaker(
             repo,
             in_directories={Path(".")},
@@ -374,7 +500,39 @@ def set_policy_bundle_context_provider(repo_getter):
             "module_count": len(policy_modules),
             "data_module_count": len(bundle_dict.get("data_modules", [])),
         }
+
+    def _provider() -> dict:
+        repo = repo_getter()
+        return _bundle_context(repo)
     post_policy_bundle.context_provider = _provider
+
+    def _hotfix_provider() -> dict:
+        repo = repo_getter()
+        module_path = os.getenv(
+            "OPAL_POLICY_HOTFIX_DEFAULT_MODULE_PATH",
+            "incident/cache_failover_hotfix.rego",
+        )
+        commit_message = os.getenv(
+            "OPAL_POLICY_HOTFIX_DEFAULT_COMMIT_MESSAGE",
+            "Apply emergency cache failover hotfix",
+        )
+        context = _bundle_context(repo)
+        current_rego = None
+        if repo is not None and len(repo.heads) != 0:
+            current_rego = read_policy_module_from_repo(repo, module_path)
+        context.update(
+            {
+                "repo_path": repo.working_dir if repo is not None else "",
+                "module_path": module_path,
+                "commit_message": commit_message,
+                "requested_rego": None,
+                "current_rego": current_rego,
+                "module_exists_before": current_rego is not None,
+            }
+        )
+        return context
+
+    policy_hotfix.context_provider = _hotfix_provider
 
 
 def set_codegen_provider(provider):
@@ -389,5 +547,6 @@ def set_codegen_provider(provider):
             ``GeminiProvider``).
     """
     post_policy_bundle.codegen_provider = provider
+    policy_hotfix.codegen_provider = provider
     post_data_update.codegen_provider = provider
     post_statistics.codegen_provider = provider

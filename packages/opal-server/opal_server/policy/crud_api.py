@@ -7,21 +7,22 @@ to trigger the standard OPAL policy-watcher refresh flow.
 """
 
 from __future__ import annotations
-
-import os
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
-from git import Actor
 from git.repo import Repo
 from opal_common.logger import logger
 from pydantic import BaseModel, Field
 from symphony import tool
 
 from opal_server.policy.bundles.api import get_repo
-
-_COMMIT_AUTHOR = Actor("OPAL Symphony", "symphony@opal.local")
+from opal_server.policy.module_ops import (
+    PolicyModulePathError,
+    delete_policy_module as delete_policy_module_from_repo,
+    module_exists as policy_module_exists,
+    upsert_policy_module,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -65,42 +66,24 @@ class PolicyModuleDelete(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _validate_module_path(module_path: str, repo: Repo) -> Path:
-    """Resolve *module_path* against the repo root, rejecting traversal and non-.rego."""
-    normalized = PurePosixPath(module_path)
-    if normalized.is_absolute():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="module_path must be relative",
+def _to_http_exception(exc: Exception) -> HTTPException:
+    """Normalize module operation errors into API-friendly HTTP exceptions."""
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, PolicyModulePathError):
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Module not found: {exc.args[0]}",
         )
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=str(exc),
+    )
 
-    repo_root = Path(repo.working_dir).resolve()
-    resolved = (repo_root / normalized).resolve()
-    if not str(resolved).startswith(str(repo_root) + os.sep):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="path traversal not allowed",
-        )
-
-    if not str(normalized).endswith(".rego"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="module_path must end with .rego",
-        )
-
-    return resolved
-
-
-def _commit_staged(repo: Repo, message: str) -> tuple[str, str]:
-    """Commit already-staged changes.  Returns ``(old_hash, new_hash)``."""
-    old_hash = repo.head.commit.hexsha
-    repo.index.commit(message, author=_COMMIT_AUTHOR, committer=_COMMIT_AUTHOR)
-    return old_hash, repo.head.commit.hexsha
-
-
-# ---------------------------------------------------------------------------
-# Router factory
-# ---------------------------------------------------------------------------
 
 def init_policy_crud_router(pubsub_endpoint=None):
     """Build and return the policy CRUD router.
@@ -140,9 +123,7 @@ def init_policy_crud_router(pubsub_endpoint=None):
         Writes the file and commits it locally. The new module is immediately
         visible in subsequent GET /policy bundle fetches.
         """
-        file_path = _validate_module_path(body.module_path, repo)
-
-        if file_path.exists():
+        if policy_module_exists(repo, body.module_path):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
@@ -150,20 +131,26 @@ def init_policy_crud_router(pubsub_endpoint=None):
                     "Use update_policy_module instead."
                 ),
             )
-
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(body.rego_content)
-        repo.index.add([str(PurePosixPath(body.module_path))])
-        old_hash, new_hash = _commit_staged(repo, body.commit_message)
+        try:
+            result = upsert_policy_module(
+                repo,
+                body.module_path,
+                body.rego_content,
+                body.commit_message,
+            )
+        except Exception as exc:
+            raise _to_http_exception(exc) from exc
 
         await _notify_policy_change()
 
-        return JSONResponse({
-            "action": "created",
-            "module_path": body.module_path,
-            "old_hash": old_hash,
-            "new_hash": new_hash,
-        })
+        return JSONResponse(
+            {
+                "action": result["action"],
+                "module_path": result["module_path"],
+                "old_hash": result["old_hash"],
+                "new_hash": result["new_hash"],
+            }
+        )
 
     # -- UPDATE -------------------------------------------------------------
 
@@ -178,9 +165,7 @@ def init_policy_crud_router(pubsub_endpoint=None):
         Overwrites the file contents and commits the change locally. The update
         is immediately visible in subsequent GET /policy bundle fetches.
         """
-        file_path = _validate_module_path(body.module_path, repo)
-
-        if not file_path.exists():
+        if not policy_module_exists(repo, body.module_path):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
@@ -188,19 +173,26 @@ def init_policy_crud_router(pubsub_endpoint=None):
                     "Use create_policy_module instead."
                 ),
             )
-
-        file_path.write_text(body.rego_content)
-        repo.index.add([str(PurePosixPath(body.module_path))])
-        old_hash, new_hash = _commit_staged(repo, body.commit_message)
+        try:
+            result = upsert_policy_module(
+                repo,
+                body.module_path,
+                body.rego_content,
+                body.commit_message,
+            )
+        except Exception as exc:
+            raise _to_http_exception(exc) from exc
 
         await _notify_policy_change()
 
-        return JSONResponse({
-            "action": "updated",
-            "module_path": body.module_path,
-            "old_hash": old_hash,
-            "new_hash": new_hash,
-        })
+        return JSONResponse(
+            {
+                "action": result["action"],
+                "module_path": result["module_path"],
+                "old_hash": result["old_hash"],
+                "new_hash": result["new_hash"],
+            }
+        )
 
     # -- DELETE -------------------------------------------------------------
 
@@ -216,33 +208,25 @@ def init_policy_crud_router(pubsub_endpoint=None):
         longer appear in subsequent GET /policy bundle fetches, and will show
         in deleted_files when fetching a differential bundle via base_hash.
         """
-        file_path = _validate_module_path(body.module_path, repo)
-
-        if not file_path.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Module not found: {body.module_path}",
+        try:
+            result = delete_policy_module_from_repo(
+                repo,
+                body.module_path,
+                body.commit_message,
             )
-
-        repo.index.remove(
-            [str(PurePosixPath(body.module_path))], working_tree=True
-        )
-        old_hash, new_hash = _commit_staged(repo, body.commit_message)
-
-        parent = file_path.parent
-        repo_root = Path(repo.working_dir)
-        while parent != repo_root and parent.exists() and not any(parent.iterdir()):
-            parent.rmdir()
-            parent = parent.parent
+        except Exception as exc:
+            raise _to_http_exception(exc) from exc
 
         await _notify_policy_change()
 
-        return JSONResponse({
-            "action": "deleted",
-            "module_path": body.module_path,
-            "old_hash": old_hash,
-            "new_hash": new_hash,
-        })
+        return JSONResponse(
+            {
+                "action": result["action"],
+                "module_path": result["module_path"],
+                "old_hash": result["old_hash"],
+                "new_hash": result["new_hash"],
+            }
+        )
 
     # -- LIST ---------------------------------------------------------------
 

@@ -165,45 +165,43 @@ class OpalStatistics:
         Called on startup when OPAL_SEED_DEMO_CLIENTS is set (defaults to
         "true").  Creates 23 clients across 5 active topics so that
         statistics-related tests exercise real data analysis — the dataset is
-        intentionally too large to count by eye, and "compliance_audit" has
-        zero subscribers so the zero-subscriber detection capability produces a
-        non-trivial finding.
+        intentionally too large to count by eye. The benchmark models a
+        production OPAL control plane with policy, incident, directory, and
+        feature rollout traffic. "compliance_audit" is intentionally absent so
+        zero-subscriber detection still produces a non-trivial finding.
         """
         demo_clients = [
-            # Web API tier (4 replicas)
-            ("opal-client-web-api-01",     ["policy_data", "users"]),
-            ("opal-client-web-api-02",     ["policy_data", "users"]),
-            ("opal-client-web-api-03",     ["policy_data", "users", "feature_flags"]),
-            ("opal-client-web-api-04",     ["policy_data", "feature_flags"]),
-            # Authorization services (4 replicas)
-            ("opal-client-authz-svc-01",   ["policy_data", "roles"]),
-            ("opal-client-authz-svc-02",   ["policy_data", "roles"]),
-            ("opal-client-authz-svc-03",   ["policy_data", "roles", "users"]),
-            ("opal-client-authz-svc-04",   ["roles"]),
-            # User management services
-            ("opal-client-user-svc-01",    ["users"]),
-            ("opal-client-user-svc-02",    ["users", "roles"]),
-            ("opal-client-user-svc-03",    ["users", "policy_data"]),
-            # Audit services — subscribed to audit_logs only
-            ("opal-client-audit-svc-01",   ["audit_logs"]),
-            ("opal-client-audit-svc-02",   ["audit_logs"]),
-            # Gateway / proxy tier (3 instances)
-            ("opal-client-gateway-01",     ["policy_data", "users", "roles"]),
-            ("opal-client-gateway-02",     ["policy_data", "users", "roles"]),
-            ("opal-client-gateway-03",     ["policy_data", "feature_flags"]),
-            # Analytics and reporting
-            ("opal-client-analytics-01",   ["users", "roles"]),
-            ("opal-client-analytics-02",   ["users", "audit_logs"]),
-            ("opal-client-reporting-01",   ["users", "roles", "policy_data"]),
-            # Mobile backend
-            ("opal-client-mobile-api-01",  ["policy_data", "users", "feature_flags"]),
-            ("opal-client-mobile-api-02",  ["policy_data", "feature_flags"]),
+            # Web API tier
+            ("opal-client-web-api-01",              ["policy_data", "feature_flags"]),
+            ("opal-client-web-api-02",              ["policy_data", "feature_flags"]),
+            ("opal-client-web-api-03",              ["policy_data"]),
+            ("opal-client-web-api-04",              ["policy_data"]),
+            # Authorization services handling incident escalations
+            ("opal-client-authz-svc-01",            ["policy_data", "incident_access"]),
+            ("opal-client-authz-svc-02",            ["policy_data", "incident_access"]),
+            ("opal-client-authz-svc-03",            ["incident_access"]),
+            ("opal-client-authz-svc-04",            ["incident_access"]),
+            # Directory sync workers
+            ("opal-client-directory-sync-01",       ["directory_sync"]),
+            ("opal-client-directory-sync-02",       ["directory_sync"]),
+            ("opal-client-directory-sync-03",       ["directory_sync", "policy_data"]),
+            ("opal-client-directory-sync-04",       ["directory_sync", "incident_access"]),
+            ("opal-client-directory-sync-05",       ["directory_sync", "feature_flags"]),
+            # SRE entry points and gateways
+            ("opal-client-sre-gateway-01",          ["policy_data", "incident_access", "audit_logs"]),
+            ("opal-client-sre-gateway-02",          ["policy_data"]),
+            # Reporting and mobile consumers
+            ("opal-client-reporting-01",            ["policy_data"]),
+            ("opal-client-reporting-02",            ["policy_data"]),
+            ("opal-client-mobile-api-01",           ["policy_data", "feature_flags"]),
+            ("opal-client-mobile-api-02",           ["policy_data", "feature_flags"]),
             # Background workers
-            ("opal-client-worker-01",      ["policy_data"]),
-            ("opal-client-worker-02",      ["roles", "users"]),
+            ("opal-client-worker-01",               ["policy_data"]),
+            ("opal-client-worker-02",               ["policy_data"]),
+            # Audit and rollout services
+            ("opal-client-audit-svc-01",            ["audit_logs"]),
+            ("opal-client-rollout-orchestrator-01", ["feature_flags"]),
             # NOTE: "compliance_audit" is intentionally absent — zero subscribers.
-            # This is the interesting finding that L1-L4 extensions should detect
-            # while L0 is likely to miss it or be imprecise.
         ]
 
         for client_id, topics in demo_clients:
@@ -477,12 +475,13 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
         name="get_statistics",
         method="GET",
         path="/statistics",
-        levels=["L0", "L1", "L2", "L3"],
+        levels=["L0", "L1", "L2", "L3", "L4"],
         level_params={
             "L0": [],
             "L1": ["extension_level", "extension_code", "execution_mode", "reversal_code"],
             "L2": ["extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
             "L3": ["extension_level", "task_description", "execution_mode", "reversal_code"],
+            "L4": ["extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
         },
         level_overrides={
             "L0": {
@@ -511,6 +510,12 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
                     "code that supplements the standard statistics logic."
                 ),
             },
+            "L4": {
+                "description": (
+                    "Get server statistics with freeform extension support while "
+                    "preserving the normal /statistics request and response shape."
+                ),
+            },
         },
     )
     @router.get("/statistics", response_model=ServerStats)
@@ -524,6 +529,7 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
         - **L1**: Post-processing via extension_code (aggregation, alerting)
         - **L2**: Auto-generated extension code for advanced analytics
         - **L3**: Source-aware — LLM reads endpoint code and generates extensions
+        - **L4**: Freeform extension on the /statistics route using the live statistics context
 
         Extension fields are accepted as a JSON request body to avoid URL
         length limits on large extension_code payloads.
@@ -587,6 +593,7 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
 
         state_dict["extension_triggered"] = ext.triggered
         state_dict["generated_code"] = ext.generated_code
+        state_dict["endpoint_source"] = ext.endpoint_source
         if ext.goex_record_id:
             state_dict["goex_record_id"] = ext.goex_record_id
             state_dict["goex_mode"] = execution_mode == "goex"

@@ -1,7 +1,7 @@
 """Simple HTTP get data fetcher using requests supports."""
 
 from enum import Enum
-from typing import Any, Union, cast
+from typing import Any, Optional, Union, cast
 
 import httpx
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
@@ -28,11 +28,11 @@ class HttpMethods(Enum):
 class HttpFetcherConfig(FetcherConfig):
     """Config for HttpFetchProvider's Adding HTTP headers."""
 
-    headers: dict = None
+    headers: Optional[dict] = None
     is_json: bool = True
     process_data: bool = True
     method: HttpMethods = HttpMethods.GET
-    data: Any = None
+    data: Optional[Any] = None
 
     @validator("method")
     def force_enum(cls, v):
@@ -48,7 +48,7 @@ class HttpFetcherConfig(FetcherConfig):
 
 class HttpFetchEvent(FetchEvent):
     fetcher: str = "HttpFetchProvider"
-    config: HttpFetcherConfig = None
+    config: Optional[HttpFetcherConfig] = None
 
 
 class HttpFetchProvider(BaseFetchProvider):

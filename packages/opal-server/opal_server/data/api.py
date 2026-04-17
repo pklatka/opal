@@ -67,6 +67,16 @@ def _default_publish_data_update(update: DataUpdate) -> list[dict]:
     ]
 
 
+def _callback_urls(update: DataUpdate) -> list[str]:
+    urls: list[str] = []
+    for callback in update.callback.callbacks:
+        if isinstance(callback, (list, tuple)):
+            urls.append(str(callback[0]))
+        else:
+            urls.append(str(callback))
+    return urls
+
+
 def init_data_updates_router(
     data_update_publisher: DataUpdatePublisher,
     data_sources_config: ServerDataSourceConfig,
@@ -158,12 +168,13 @@ def init_data_updates_router(
         name="publish_data_update",
         method="POST",
         path=opal_server_config.DATA_CONFIG_ROUTE,
-        levels=["L0", "L1", "L2", "L3"],
+        levels=["L0", "L1", "L2", "L3", "L4"],
         level_params={
             "L0": ["entries", "reason", "id", "callback"],
             "L1": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "execution_mode", "reversal_code"],
             "L2": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
             "L3": ["entries", "reason", "id", "callback", "extension_level", "task_description", "execution_mode", "reversal_code"],
+            "L4": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
         },
         level_overrides={
             "L0": {
@@ -192,6 +203,12 @@ def init_data_updates_router(
                     "supplements the standard publish logic."
                 ),
             },
+            "L4": {
+                "description": (
+                    "Publish a data update with freeform extension support while "
+                    "preserving the normal /data/config request and response shape."
+                ),
+            },
         },
     )
     @router.post(opal_server_config.DATA_CONFIG_ROUTE)
@@ -206,6 +223,7 @@ def init_data_updates_router(
         - **L1**: Post-processing via extension_code (validate, filter, deduplicate)
         - **L2**: Auto-generated extension code for advanced entry processing
         - **L3**: Source-aware — LLM reads endpoint code and generates extensions
+        - **L4**: Freeform extension on the /data/config route using the live update context
 
         Extension fields (extension_level, extension_code, task_description,
         execution_mode, reversal_code) are part of the JSON request body to
@@ -278,6 +296,7 @@ def init_data_updates_router(
             logger.warning("Data update publisher not configured; update not broadcast")
 
         response: dict = {"status": "ok"}
+        response["callback_urls"] = _callback_urls(update)
         if outcome.needs_extension:
             response["needs_extension"] = True
             if outcome.extension_context:
@@ -285,6 +304,7 @@ def init_data_updates_router(
         if ext.triggered:
             response["extension_triggered"] = True
             response["generated_code"] = ext.generated_code or extension_code
+            response["endpoint_source"] = ext.endpoint_source
             response["entries_published"] = len(update.entries)
         if ext.goex_record_id:
             response["goex_record_id"] = ext.goex_record_id

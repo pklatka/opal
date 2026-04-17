@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 from typing import List, Optional
 
 import fastapi.responses
@@ -116,6 +117,28 @@ def _build_bundle_context(bundle: PolicyBundle) -> dict:
     }
 
 
+_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([A-Za-z0-9_.]+)\s*$")
+
+
+def _infer_package_name(rego: str) -> str:
+    match = _PACKAGE_RE.search(rego or "")
+    return match.group(1) if match else ""
+
+
+def _normalize_bundle_package_names(bundle: PolicyBundle) -> PolicyBundle:
+    """Backfill empty package_name fields from the Rego source.
+
+    The benchmark policy repo intentionally includes plain Rego files whose
+    schema objects may arrive with an empty package_name even though the
+    source contains a valid `package ...` declaration. Normalize once here so
+    extension helpers and final benchmark answers see stable metadata.
+    """
+    for module in bundle.policy_modules:
+        if not getattr(module, "package_name", ""):
+            module.package_name = _infer_package_name(getattr(module, "rego", ""))
+    return bundle
+
+
 def _default_get_policy(repo: Repo, input_paths: List[Path], base_hash: Optional[str]) -> PolicyBundle:
     """Default L0 bundle-building logic (used as default_source for L3 getsource)."""
     maker = BundleMaker(
@@ -133,10 +156,12 @@ def _default_get_policy(repo: Repo, input_paths: List[Path], base_hash: Optional
             logger.warning(f"base_hash {base_hash} not exist in the repo")
 
     if revision is None:
-        return maker.make_bundle(repo.head.commit)
+        return _normalize_bundle_package_names(maker.make_bundle(repo.head.commit))
     try:
         old_commit = repo.commit(base_hash)
-        return maker.make_diff_bundle(old_commit, repo.head.commit)
+        return _normalize_bundle_package_names(
+            maker.make_diff_bundle(old_commit, repo.head.commit)
+        )
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -148,12 +173,13 @@ def _default_get_policy(repo: Repo, input_paths: List[Path], base_hash: Optional
     name="get_policy_bundle",
     method="GET",
     path="/policy",
-    levels=["L0", "L1", "L2", "L3"],
+    levels=["L0", "L1", "L2", "L3", "L4"],
     level_params={
         "L0": ["path", "base_hash"],
         "L1": ["path", "base_hash", "extension_level", "extension_code", "execution_mode", "reversal_code"],
         "L2": ["path", "base_hash", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
         "L3": ["path", "base_hash", "extension_level", "task_description", "execution_mode", "reversal_code"],
+        "L4": ["path", "base_hash", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
     },
     level_overrides={
         "L0": {
@@ -185,6 +211,12 @@ def _default_get_policy(repo: Repo, input_paths: List[Path], base_hash: Optional
                 "code that supplements the standard bundle building logic."
             ),
         },
+        "L4": {
+            "description": (
+                "Fetch policy bundle with freeform extension support while "
+                "preserving the normal /policy request and response shape."
+            ),
+        },
     },
 )
 @router.get("/policy", response_model=PolicyBundle)
@@ -204,6 +236,7 @@ async def get_policy(
     - **L1**: Post-processing via extension_code (filter, transform bundle)
     - **L2**: Auto-generated extension code for advanced bundle processing
     - **L3**: Source-aware — LLM reads endpoint code and generates extensions
+    - **L4**: Freeform extension on the /policy route using the same bundle context
 
     Extension fields (extension_level, extension_code, task_description,
     execution_mode, reversal_code) are accepted as a JSON request body to
@@ -253,6 +286,7 @@ async def get_policy(
 
     bundle_dict["extension_triggered"] = ext.triggered
     bundle_dict["generated_code"] = ext.generated_code
+    bundle_dict["endpoint_source"] = ext.endpoint_source
     bundle_dict["goex_record_id"] = ext.goex_record_id
     bundle_dict["goex_mode"] = execution_mode == "goex"
     bundle_dict["goex_reversal_code"] = ext.goex_reversal_code

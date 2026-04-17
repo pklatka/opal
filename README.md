@@ -5,9 +5,9 @@
 
 ## Overview
 
-OPAL is an administration layer for Open Policy Agent (OPA) that detects changes to both policy and policy data in real time, pushing live updates to policy agents. This example integrates Symphony's extension framework directly into the OPAL server, adding three extensible endpoints that cover the core use cases: policy bundle serving, data update publishing, and server statistics.
+OPAL is an administration layer for Open Policy Agent (OPA) that detects changes to both policy and policy data in real time, pushing live updates to policy agents. This example integrates Symphony's extension framework directly into the OPAL server, adding four benchmark-oriented control-plane workflows: policy bundle triage, guarded policy hotfixes, data update publishing, and server statistics.
 
-Three Symphony-extended endpoints provide rich test cases covering read-only bundle filtering, statistics aggregation, and mutating data updates. Additionally, a set of **policy CRUD endpoints** allow LLM agents to create, update, and delete `.rego` modules directly in the tracked Git clone — each operation commits locally so changes are immediately visible in subsequent bundle fetches and properly reported in differential bundles.
+The benchmark now mirrors real operator tasks more closely: incident-time policy lookup, fleet blast-radius reporting, callback-aware data rollout sanitization, and a GoEx-protected emergency policy hotfix. A set of **policy CRUD endpoints** still allows LLM agents to create, update, and delete `.rego` modules directly in the tracked Git clone — each operation commits locally so changes are immediately visible in subsequent bundle fetches and properly reported in differential bundles.
 
 ## Capabilities
 
@@ -32,10 +32,19 @@ Three Symphony-extended endpoints provide rich test cases covering read-only bun
 | `filter_entries_by_topic` | `(entries, topic) → list[dict]` | `False` | Entries belonging to a specific topic |
 | `exclude_entries_by_topic` | `(entries, topic) → list[dict]` | `False` | Exclude entries for a specific topic |
 | `get_all_entry_topics` | `(entries) → list[str]` | `False` | All unique topics across entries |
-| `deduplicate_entries` | `(entries) → list[dict]` | `False` | Remove duplicates by url+dst_path |
+| `deduplicate_entries` | `(entries) → list[dict]` | `False` | Remove duplicates by topics+dst_path |
 | `filter_entries_by_dst_path` | `(entries, path_prefix) → list[dict]` | `False` | Entries whose dst_path starts with prefix |
 | `validate_entry_urls` | `(entries) → list[dict]` | `False` | Keep only entries with valid http(s) URLs |
 | `set_entry_save_method` | `(entries, save_method) → list[dict]` | **`True`** | Set save_method (PUT/PATCH) on all entries |
+
+### Policy Hotfix Capabilities
+
+| Capability | Signature | `mutates` | Description |
+|---|---|---|---|
+| `read_policy_module` | `(repo_path, module_path) → str \| null` | `False` | Read the current module contents from the tracked Git clone |
+| `module_exists` | `(repo_path, module_path) → bool` | `False` | Check whether a module exists in the tracked clone |
+| `upsert_policy_module` | `(repo_path, module_path, rego_content, commit_message) → dict` | **`True`** | Create or replace a module and commit it |
+| `delete_policy_module` | `(repo_path, module_path, commit_message, missing_ok=False) → dict` | **`True`** | Delete a module and commit the removal |
 
 ### Statistics Capabilities
 
@@ -55,13 +64,14 @@ goex_registry = GoExRegistry(auto_approve=False, auto_approve_readonly=True)
 ```
 
 - Read-only code (bundle filtering, statistics analysis, entry inspection) → **auto-approved**
-- Mutating code (`set_entry_save_method`) → **held for SRE review**
+- Mutating code (`set_entry_save_method`, `upsert_policy_module`, `delete_policy_module`) → **held for SRE review**
 
 ## Extension Points
 
 | Extension Point | Description | Endpoint |
 |---|---|---|
 | `post_policy_bundle` | Filter, transform, or augment policy bundles before serving | `GET /policy` |
+| `policy_hotfix` | Create or revise an emergency policy module via the tracked Git repo | `POST /symphony/code_extension` |
 | `post_data_update` | Validate, filter, deduplicate, or transform data entries before publishing | `POST /data/config` |
 | `post_statistics` | Compute aggregates, detect anomalies, or reformat statistics | `GET /statistics` |
 
@@ -75,7 +85,6 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 | `create_policy_module` | `POST /policy/modules` | Write a new `.rego` file and commit; returns `old_hash` / `new_hash` |
 | `update_policy_module` | `PUT /policy/modules` | Overwrite an existing `.rego` file and commit |
 | `delete_policy_module` | `DELETE /policy/modules` | Remove a `.rego` file and commit; shows in `deleted_files` for diff bundles |
-
 **Request body fields (create / update):** `module_path` (repo-relative, e.g. `compliance/block.rego`), `rego_content` (raw Rego source), `commit_message` (optional).
 
 **Change detection:** After a CRUD commit, fetching a differential bundle with `base_hash` set to the pre-mutation hash correctly reports additions, modifications, and deletions through OPAL's standard `BundleMaker.make_diff_bundle` mechanism.
@@ -129,6 +138,76 @@ SYMPHONY_CODEGEN_PROVIDER=gemini SYMPHONY_CODEGEN_MODEL=gemini-2.5-flash \
   uv run python -m uvicorn opal_server.main:app --reload --timeout-keep-alive 300
 ```
 
+## Running On Kubernetes (kind / EKS)
+
+The benchmark source of truth is now a real OPAL deployment:
+
+- Postgres broadcast backbone
+- 2 `opal_server` replicas
+- 8 `opal_client` workloads with inline OPA
+- a benchmark data-source service
+- embedded Symphony MCP + `/symphony/code_extension`
+
+Local `kind` bootstrap from repo root:
+
+```bash
+./scripts/start_opal.sh
+```
+
+This defaults to:
+
+```bash
+OPAL_POLICY_REPO_URL=https://github.com/pklatka/opal-example-policy-repo
+```
+
+Override it only if you want to benchmark against a different public policy repo.
+
+That path creates or reuses a `kind` cluster, deploys the stack, and
+port-forwards:
+
+- public API + embedded MCP to `http://127.0.0.1:8000`
+- single-writer admin API to `http://127.0.0.1:8001`
+
+The deployer writes a generated env file under `/tmp/` only after the full
+stack is ready, containing `OPAL_BASE_URL`, `OPAL_ADMIN_BASE_URL`,
+`OPAL_NAMESPACE`, `OPAL_KUBE_CONTEXT`, `OPAL_CLIENT_TOKEN`, and
+`OPAL_DATA_SOURCE_TOKEN`.
+
+Existing EKS cluster deployment:
+
+```bash
+export AWS_REGION=us-east-1
+./scripts/opal/deploy_opal_k8.sh --target eks --namespace symphony-opal
+```
+
+Run the benchmark against the deployed cluster:
+
+```bash
+OPAL_BASE_URL=http://127.0.0.1:8000 \
+OPAL_ADMIN_BASE_URL=http://127.0.0.1:8001 \
+OPAL_NAMESPACE=symphony-opal \
+./scripts/run_opal_tests.sh anthropic haiku
+
+OPAL_BASE_URL=http://127.0.0.1:8000 \
+OPAL_ADMIN_BASE_URL=http://127.0.0.1:8001 \
+OPAL_NAMESPACE=symphony-opal \
+./scripts/run_opal_goex_tests.sh anthropic haiku
+```
+
+`run_opal_tests.sh` now resets benchmark state before each standard-suite job
+via `POST /symphony/benchmark/reset`. Use `--no-reset-state` or
+`OPAL_BENCHMARK_RESET=0` only when you explicitly want to reuse prior state.
+
+## Legacy Single-Process Mode
+
+The old single-process control-plane path is still available for debugging:
+
+```bash
+./scripts/start_opal_single_process.sh
+```
+
+Use `serve_prod.py` only when you explicitly want the old single-node flow.
+
 ### LLM Provider (required for L1+)
 
 ```bash
@@ -149,56 +228,61 @@ uv run python agent_cli.py --provider gemini --level L2 "Analyze which topics ha
 
 ## Test Plan 1: L0 vs L1 vs L2 vs L3 vs L4
 
-### Case A: Policy Bundle Filtering (read-only)
+The exact benchmark prompt strings live in
+[`TESTING_PLAN.md`](TESTING_PLAN.md) and
+[`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh). The examples
+below describe the same scenarios at a higher level.
 
-**Prompt:** `"Fetch the policy bundle but only include modules related to RBAC (package containing 'rbac'). Exclude any test modules and anything under the single-topic-multi-tenant/ directory. Return the filtered policy bundle with full module objects (path + rego source)."`
+### Case A: Incident Policy Triage (read-only)
+
+**Prompt:** see the exact multi-line `opal/test1` prompt in [`TESTING_PLAN.md`](TESTING_PLAN.md).
 
 ```bash
-uv run python agent_cli.py --level L0 "Fetch the policy bundle but only include modules related to RBAC (package containing 'rbac'). Exclude any test modules and anything under the single-topic-multi-tenant/ directory. Return the filtered policy bundle with full module objects (path + rego source)."
-uv run python agent_cli.py --level L1 "Fetch the policy bundle but only include modules related to RBAC (package containing 'rbac'). Exclude any test modules and anything under the single-topic-multi-tenant/ directory. Return the filtered policy bundle with full module objects (path + rego source)."
-uv run python agent_cli.py --level L2 "Fetch the policy bundle but only include modules related to RBAC (package containing 'rbac'). Exclude any test modules and anything under the single-topic-multi-tenant/ directory. Return the filtered policy bundle with full module objects (path + rego source)."
-uv run python agent_cli.py --level L3 "Fetch the policy bundle but only include modules related to RBAC (package containing 'rbac'). Exclude any test modules and anything under the single-topic-multi-tenant/ directory. Return the filtered policy bundle with full module objects (path + rego source)."
-uv run python agent_cli.py --level L4 "Fetch the policy bundle but only include modules related to RBAC (package containing 'rbac'). Exclude any test modules and anything under the single-topic-multi-tenant/ directory. Return the filtered policy bundle with full module objects (path + rego source)."
+uv run python agent_cli.py --level L0 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
+uv run python agent_cli.py --level L1 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
+uv run python agent_cli.py --level L2 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
+uv run python agent_cli.py --level L3 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
+uv run python agent_cli.py --level L4 "This is an OPAL benchmark lookup task, not an incident-response simulation. Benchmark auth is already configured. An SRE is triaging a sev-1 outage in the production payments cluster and needs the exact break-glass policy module that should be applied. Fetch the live policy bundle from the OPAL control plane and return only the single matching module path."
 ```
 
 | Level | Expected behavior | Features exercised |
 |-------|------------------|-------------------|
-| **L0** | Returns entire policy bundle with all modules from the repo — test files, tenant overrides, data modules, everything. | Vanilla API, MCP routing |
-| **L1** | Sends extension_code that chains `filter_modules_by_package(modules, "rbac")` → `exclude_test_modules()` → `exclude_modules_by_path(result, "single-topic-multi-tenant/")`. Returns only core RBAC modules. | Sandbox execution, capability chaining, read-only auto-approve |
-| **L2** | Sends request with task_description. Server generates the same filtering pipeline or signals `needs_extension`. CLI generates code using capability docs. | Two-phase flow, `needs_extension`, server codegen |
-| **L3** | Server reads `_default_get_policy` source, generates supplemental filtering code that adds RBAC isolation on top of standard bundle building. | Source code reading, `server_generate_and_execute()` |
-| **L4** | Agent sends freeform prompt to `/symphony/code_extension`: filter by rbac package, exclude tests and tenant overrides. | Freeform code generation from capabilities |
+| **L0** | Returns the full policy bundle; the model still has to identify the correct break-glass module from realistic distractors. | Vanilla API, MCP routing |
+| **L1** | Sends extension code that filters the bundle down to the single incident policy. | Sandbox execution, capability chaining, read-only auto-approve |
+| **L2** | Sends a task description and lets the server generate the filtering logic. | Two-phase flow, `needs_extension`, server codegen |
+| **L3** | Server reads `_default_get_policy` and generates source-aware bundle triage code. | Source code reading, `server_generate_and_execute()` |
+| **L4** | Uses the same `get_policy_bundle` route with `extension_level="L4"` so the benchmark stays on the domain endpoint instead of drifting to generic tooling. | Freeform extension on the benchmarked route |
 
-### Case B: Statistics Analysis (read-only)
+### Case B: Fleet Blast-Radius Report (read-only)
 
-**Prompt:** `"Get server statistics and analyze them. Count how many clients are subscribed to each topic, identify topics with zero subscribers from [policy_data, users, roles, audit_logs], and report total client and server counts. Return a structured summary."`
+**Prompt:** see the exact multi-line `opal/test2` prompt in [`TESTING_PLAN.md`](TESTING_PLAN.md).
 
 ```bash
-uv run python agent_cli.py --level L0 "Get server statistics and analyze them. Count how many clients are subscribed to each topic, identify topics with zero subscribers from [policy_data, users, roles, audit_logs], and report total client and server counts. Return a structured summary."
-uv run python agent_cli.py --level L1 "Get server statistics and analyze them. Count how many clients are subscribed to each topic, identify topics with zero subscribers from [policy_data, users, roles, audit_logs], and report total client and server counts. Return a structured summary."
-uv run python agent_cli.py --level L2 "Get server statistics and analyze them. Count how many clients are subscribed to each topic, identify topics with zero subscribers from [policy_data, users, roles, audit_logs], and report total client and server counts. Return a structured summary."
+uv run python agent_cli.py --level L0 "This is an OPAL benchmark extraction task, not a dashboard-writing exercise. Benchmark auth is already configured. Analyze topics [policy_data, incident_access, feature_flags, directory_sync, audit_logs, compliance_audit]. Use the normalized benchmark_stats view to compute client counts per topic, zero-subscriber topics, exact audit_logs subscribers, exact incident_access subscribers, and total client/server counts."
+uv run python agent_cli.py --level L1 "This is an OPAL benchmark extraction task, not a dashboard-writing exercise. Benchmark auth is already configured. Analyze topics [policy_data, incident_access, feature_flags, directory_sync, audit_logs, compliance_audit]. Use the normalized benchmark_stats view to compute client counts per topic, zero-subscriber topics, exact audit_logs subscribers, exact incident_access subscribers, and total client/server counts."
+uv run python agent_cli.py --level L2 "This is an OPAL benchmark extraction task, not a dashboard-writing exercise. Benchmark auth is already configured. Analyze topics [policy_data, incident_access, feature_flags, directory_sync, audit_logs, compliance_audit]. Use the normalized benchmark_stats view to compute client counts per topic, zero-subscriber topics, exact audit_logs subscribers, exact incident_access subscribers, and total client/server counts."
 ```
 
 | Level | Expected behavior | Features exercised |
 |-------|------------------|-------------------|
-| **L0** | Returns raw `ServerStats` JSON with nested client-channel mappings. The LLM must parse this manually in its response. | Raw nested JSON, manual parsing by agent |
-| **L1** | Extension code calls `count_clients_per_topic(stats)` and `get_topics_with_no_subscribers(stats, [...])` plus `get_client_count()` / `get_server_count()` for totals. Returns structured summary dict. | Multi-capability composition, aggregate computation |
-| **L2** | Server determines raw stats is insufficient for structured analysis, generates aggregation pipeline or signals `needs_extension`. | Two-phase with semantic analysis |
+| **L0** | Returns normalized benchmark statistics so the model can extract exact counts and subscriber lists without reverse-engineering control-plane channels. | Benchmark-safe normalization, exact extraction |
+| **L1** | Extension code still triggers, but the final answer is expected to use the normalized benchmark view for exact fields. | Multi-capability composition plus normalized stats |
+| **L2** | Server generates benchmark-focused statistics logic while preserving the same `/statistics` route shape. | Two-phase with benchmark-focused analytics |
 
-### Case C: Data Update Sanitization (mutating)
+### Case C: Callback-Aware Emergency Data Rollout (mutating)
 
-**Prompt:** `"Publish a data update with these entries: 1) topic 'users', url 'https://api.example.com/users', dst_path '/users'. 2) topic 'users', url 'https://api.example.com/users', dst_path '/users' (duplicate). 3) topic 'audit_logs', url 'api.example.com/audit-logs', dst_path '/audit_logs' (invalid URL). 4) topic 'roles', url 'https://api.example.com/roles', dst_path '/roles'. Before publishing: exclude audit_logs topic, deduplicate by url+dst_path, validate URLs (http/https only), set save_method to PUT. Explain what was filtered."`
+**Prompt:** see the exact multi-line `opal/test3` prompt in [`TESTING_PLAN.md`](TESTING_PLAN.md).
 
 ```bash
-uv run python agent_cli.py --level L0 "Publish a data update with these entries: 1) topic users, url https://api.example.com/users, dst_path /users. 2) topic users, url https://api.example.com/users, dst_path /users (duplicate). 3) topic audit_logs, url api.example.com/audit-logs (invalid), dst_path /audit_logs. 4) topic roles, url https://api.example.com/roles, dst_path /roles. Before publishing: exclude audit_logs, deduplicate, validate URLs, set save_method to PUT."
-uv run python agent_cli.py --level L1 "Publish a data update with these entries: 1) topic users, url https://api.example.com/users, dst_path /users. 2) topic users, url https://api.example.com/users, dst_path /users (duplicate). 3) topic audit_logs, url api.example.com/audit-logs (invalid), dst_path /audit_logs. 4) topic roles, url https://api.example.com/roles, dst_path /roles. Before publishing: exclude audit_logs, deduplicate, validate URLs, set save_method to PUT."
-uv run python agent_cli.py --level L2 "Publish a data update with these entries: 1) topic users, url https://api.example.com/users, dst_path /users. 2) topic users, url https://api.example.com/users, dst_path /users (duplicate). 3) topic audit_logs, url api.example.com/audit-logs (invalid), dst_path /audit_logs. 4) topic roles, url https://api.example.com/roles, dst_path /roles. Before publishing: exclude audit_logs, deduplicate, validate URLs, set save_method to PUT."
+uv run python agent_cli.py --level L0 "This is an OPAL benchmark mutation task, not a rollout-planning exercise. Benchmark auth is already configured. Publish a data update with a one-time callback to https://ops.internal/v1/opal/update-report. Allow only incident_access, directory_sync, and feature_flags topics; exclude audit_logs; reject staging hosts; validate URLs; deduplicate by topic+dst_path; and force save_method=PUT."
+uv run python agent_cli.py --level L1 "This is an OPAL benchmark mutation task, not a rollout-planning exercise. Benchmark auth is already configured. Publish a data update with a one-time callback to https://ops.internal/v1/opal/update-report. Allow only incident_access, directory_sync, and feature_flags topics; exclude audit_logs; reject staging hosts; validate URLs; deduplicate by topic+dst_path; and force save_method=PUT."
+uv run python agent_cli.py --level L2 "This is an OPAL benchmark mutation task, not a rollout-planning exercise. Benchmark auth is already configured. Publish a data update with a one-time callback to https://ops.internal/v1/opal/update-report. Allow only incident_access, directory_sync, and feature_flags topics; exclude audit_logs; reject staging hosts; validate URLs; deduplicate by topic+dst_path; and force save_method=PUT."
 ```
 
 | Level | Expected behavior | Features exercised |
 |-------|------------------|-------------------|
-| **L0** | Publishes all 4 entries as-is. Invalid URL and duplicate reach OPA clients; audit_logs suppression is ignored. | Vanilla publish, no sanitization |
-| **L1** | Extension code chains `exclude_entries_by_topic(entries, "audit_logs")` → `deduplicate_entries()` → `validate_entry_urls()` → `set_entry_save_method(result, "PUT")`. Publishes only 2 safe entries. | Capability chaining, sanitization pipeline, `mutates=True` detection |
+| **L0** | Publishes the raw batch and callback as-is. | Vanilla publish, no sanitization |
+| **L1** | Extension code sanitizes the rollout batch before publish and preserves the one-time callback. | Capability chaining, sanitization pipeline, `mutates=True` detection |
 | **L2** | Server generates the sanitization pipeline or signals `needs_extension`. | Two-phase + mutation handling |
 
 ---
@@ -240,80 +324,78 @@ uv run python agent_cli.py --provider gemini --level L1 --no-reasoning "<PROMPT>
 
 ---
 
-## Test Plan 3: GoEx Modes Comparison (Mutation Safety Cases)
+## Test Plan 3: GoEx Modes Comparison (Guarded Policy Hotfix)
 
-These prompts test GoEx's safety mechanisms for mutating data updates.
+The GoEx benchmark now exercises a realistic control-plane mutation without
+adding a benchmark-specific OPAL API route: it uses the existing
+`code_extension` endpoint plus the existing policy module CRUD endpoints.
 
-### Case G1: Audit Topic Suppression (safe filtering)
-
-**Prompt:** `"Publish a data update that excludes the audit_logs topic and validates all URLs. Use GoEx mode."`
+### Case G1: L0 Baseline (direct hotfix apply)
 
 ```bash
-uv run python agent_cli.py --level L1 "Publish a data update with entries for users, roles, and audit_logs topics. Exclude audit_logs, validate all URLs are http/https, use GoEx mode."
+uv run python agent_cli_goex.py \
+  --api-url http://127.0.0.1:8000 \
+  --mcp-url http://127.0.0.1:8000/mcp/sse \
+  --codegen-provider ws://127.0.0.1:8000/symphony/codegen/ws \
+  --provider anthropic \
+  --level L0 \
+  --execution-mode direct
 ```
 
-**What to observe:**
-- Extension code calls `exclude_entries_by_topic()` and `validate_entry_urls()` — no `set_entry_save_method` mutation
-- `_code_is_readonly()` returns `True` (filtering caps are all `mutates=False`)
-- GoEx status: `auto_approved` (not held for review)
+What to observe:
 
-### Case G2: Save Method Change (mutation safety)
+- the harness uses `list_policy_modules` and then `create_policy_module` or
+  `update_policy_module`
+- `incident/cache_failover_hotfix.rego` is created or updated
+- the harness performs explicit cleanup after verification
+- no GoEx record is created in direct mode
 
-**Prompt:** `"Publish a data update. Change the save_method to PUT for all entries. Use GoEx for safety."`
+### Case G2: L1–L3 GoEx hotfix apply
 
 ```bash
-uv run python agent_cli.py --level L1 "Publish a data update with entries for users and roles topics. Set save_method to PUT on all entries. Use GoEx mode."
+uv run python agent_cli_goex.py \
+  --api-url http://127.0.0.1:8000 \
+  --mcp-url http://127.0.0.1:8000/mcp/sse \
+  --codegen-provider ws://127.0.0.1:8000/symphony/codegen/ws \
+  --provider anthropic \
+  --level L1 \
+  --execution-mode goex
 ```
 
-**What to observe:**
-- Extension code calls `set_entry_save_method(entries, "PUT")` which is `mutates=True`
-- `_code_is_readonly()` returns `False` because `set_entry_save_method` is referenced
-- GoEx status: `executed` (held for SRE review, NOT auto-approved)
-- Reversal code is available
+What to observe:
 
-### Case G3: Read-Only Statistics Analysis (safe aggregation)
+- the agent uses the existing `code_extension` endpoint with
+  `extension_point="policy_hotfix"`
+- extension code or generated code calls `upsert_policy_module(...)`
+- GoEx records the mutation because policy writes are `mutates=True`
+- the created module contains package `app.incident.cache_failover_hotfix`
+- the record includes executable `reversal_code`
 
-**Prompt:** `"Get server statistics and count clients per topic. Use GoEx mode."`
+### Case G3: L4 freeform hotfix apply
 
 ```bash
-uv run python agent_cli.py --level L1 "Get server statistics and count clients per topic. Use GoEx mode."
+uv run python agent_cli_goex.py \
+  --api-url http://127.0.0.1:8000 \
+  --mcp-url http://127.0.0.1:8000/mcp/sse \
+  --codegen-provider ws://127.0.0.1:8000/symphony/codegen/ws \
+  --provider anthropic \
+  --level L4 \
+  --execution-mode goex
 ```
 
-**What to observe:**
-- Code only calls `count_clients_per_topic(stats)` — all `mutates=False`
-- `_code_is_readonly()` returns `True`
-- GoEx status: `auto_approved`
+What to observe:
 
-### Case G4: Emergency Data Sanitization (full pipeline + GoEx)
+- the agent prefers `code_extension` with `extension_point="policy_hotfix"`
+- generated code uses the hotfix capability set and the hotfix context provider
+- GoEx still captures the mutation and reversal metadata
 
-**Prompt:** `"Publish an emergency data update. Allow only users and roles topics, deduplicate, validate URLs, set save_method to PUT. Use GoEx for audit trail."`
+### GoEx SRE endpoint verification
 
-```bash
-uv run python agent_cli.py --level L1 "Publish an emergency data update: 1) topic users, url https://secops.internal/v1/users, dst_path /users. 2) topic roles, url https://secops.internal/v1/roles, dst_path /roles. 3) topic audit_logs, url https://secops.internal/v1/audit, dst_path /audit (must be excluded). Allow only users/roles, deduplicate, validate URLs, set save_method to PUT. Use GoEx mode."
-```
-
-**What to observe:**
-- Code chains multiple caps including `set_entry_save_method` (`mutates=True`)
-- GoEx status: `executed` (held because of mutation)
-- `goex_reversal_code` available for rollback if needed
-
-### GoEx SRE Endpoint Verification
-
-After running GoEx cases, verify records via the API:
+After a GoEx run:
 
 ```bash
-# List all GoEx records
 curl http://127.0.0.1:8000/symphony/goex/records
-
-# Filter by status
 curl "http://127.0.0.1:8000/symphony/goex/records?status=executed"
-
-# Get specific record
 curl http://127.0.0.1:8000/symphony/goex/records/<RECORD_ID>
-
-# Approve a record
-curl -X POST http://127.0.0.1:8000/symphony/goex/records/<RECORD_ID>/approve
-
-# Reverse a record
 curl -X POST http://127.0.0.1:8000/symphony/goex/records/<RECORD_ID>/reverse
 ```
