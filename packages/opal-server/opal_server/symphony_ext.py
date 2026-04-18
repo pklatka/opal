@@ -537,8 +537,26 @@ def set_policy_bundle_context_provider(repo_getter):
     def _hotfix_provider() -> dict:
         repo = repo_getter()
         context = _bundle_context(repo)
+        policy_modules = context.get("policy_modules", [])
+        incident_modules = [
+            module
+            for module in policy_modules
+            if isinstance(module, dict) and str(module.get("path", "")).startswith("incident/")
+        ]
+        module_index = [
+            {
+                "path": module.get("path", ""),
+                "package_name": module.get("package_name", ""),
+            }
+            for module in policy_modules
+            if isinstance(module, dict)
+        ]
         context.update(
             {
+                "policy_modules": incident_modules,
+                "modules": incident_modules,
+                "module_index": module_index,
+                "module_count": len(incident_modules),
                 "repo_path": repo.working_dir if repo is not None else "",
                 "module_path": os.getenv(
                     "OPAL_POLICY_HOTFIX_DEFAULT_MODULE_PATH",

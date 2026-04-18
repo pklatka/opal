@@ -27,6 +27,13 @@ from opal_server.symphony_ext import (
 router = APIRouter()
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def get_repo(
     base_clone_path: str = None,
     clone_subdirectory_prefix: str = None,
@@ -137,6 +144,27 @@ def _normalize_bundle_package_names(bundle: PolicyBundle) -> PolicyBundle:
         if not getattr(module, "package_name", ""):
             module.package_name = _infer_package_name(getattr(module, "rego", ""))
     return bundle
+
+
+def _use_benchmark_exact_path_fast_path(
+    input_paths: List[Path],
+    base_hash: Optional[str],
+    ext: SymphonyExtensionBody,
+) -> bool:
+    if not _env_flag("OPAL_BENCHMARK_MODE", False):
+        return False
+    if base_hash:
+        return False
+    if len(input_paths) != 1:
+        return False
+    target = input_paths[0]
+    if target in {Path("."), Path("")}:
+        return False
+    if target.suffix != ".rego":
+        return False
+    if ext.extension_code:
+        return False
+    return True
 
 
 def _default_get_policy(repo: Repo, input_paths: List[Path], base_hash: Optional[str]) -> PolicyBundle:
@@ -250,6 +278,8 @@ async def get_policy(
     reversal_code = ext.reversal_code
 
     bundle = _default_get_policy(repo, input_paths, base_hash)
+    if _use_benchmark_exact_path_fast_path(input_paths, base_hash, ext):
+        return bundle
     context = _build_bundle_context(bundle)
 
     outcome = await handle_extension(

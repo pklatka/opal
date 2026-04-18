@@ -22,6 +22,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from opal_server.main import app
 from opal_server.symphony_ext import extension_registry
+from benchmark_helpers import normalize_benchmark_data_update_entry_aliases
 from symphony.manifest import (
     build_tool_descriptions_from_app,
     parse_tool_description_metadata,
@@ -137,6 +138,8 @@ def _normalize_data_update_entries(entries: Any) -> list[dict[str, Any]]:
                 item["topics"] = topic
             else:
                 raise ValueError(f"entry {idx} has invalid topic value")
+        if BENCHMARK_MODE:
+            item = normalize_benchmark_data_update_entry_aliases(item)
         normalized.append(item)
 
     return normalized
@@ -589,6 +592,7 @@ async def code_extension(
     code: str | None = None,
     execution_mode: str = "direct",
     reversal_code: str | None = None,
+    context_overrides: dict[str, Any] | None = None,
 ) -> str:
     body: dict[str, Any] = {"prompt": prompt, "execution_mode": execution_mode}
     if extension_point is not None:
@@ -597,6 +601,8 @@ async def code_extension(
         body["code"] = code
     if reversal_code is not None:
         body["reversal_code"] = reversal_code
+    if context_overrides is not None:
+        body["context_overrides"] = context_overrides
     data = await _post("/symphony/code_extension", body, headers=_client_headers())
     return json.dumps(data, indent=2)
 

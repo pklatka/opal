@@ -132,32 +132,38 @@ HOTFIX_MODULE_PATH = DEFAULT_SCENARIO.module_path
 GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L1": (
         "You are running an OPAL GoEx test at L1. Do not call apply_policy_hotfix because that endpoint does "
-        "not exist. Call code_extension exactly once with prompt equal to the task, extension_point='policy_hotfix', "
-        "execution_mode='goex', explicit Python code, and explicit reversal_code. The code must build the requested "
-        "Rego source and assign result = upsert_policy_module(context['repo_path'], context['module_path'], "
-        "rego_source, context['commit_message']). Add any extra fields directly onto that result dict instead of "
-        "wrapping it under another key such as upsert_result. The reversal_code must delete the module if it was "
-        "newly created, or restore context['current_rego'] with upsert_policy_module(...) if it already existed."
+        "not exist. Call code_extension exactly once with extension_point='policy_hotfix', execution_mode='goex', "
+        "explicit Python code, explicit reversal_code, and context_overrides for module_path and commit_message. "
+        "Use a short execution prompt, not the full task text again. The forward code must return a single flat dict "
+        "with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
+        "Do not wrap the mutation under upsert_result, update_result, upsert_policy_module, or any other nested key. "
+        "The reversal_code must restore previous_rego with upsert_policy_module(...) when previous_rego is not None, "
+        "or delete the module with delete_policy_module(..., missing_ok=True) when previous_rego is None, then set "
+        "result = 'reversed'."
     ),
     "L2": (
         "You are running an OPAL GoEx test at L2. Use the existing code_extension tool, not any benchmark-specific "
         "hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. "
-        "Write a precise prompt telling the server to create or replace the requested hotfix module, return the dict from "
-        "upsert_policy_module(...) as the final result, add any metadata directly onto that dict instead of nesting it, "
-        "and generate real reversal logic that restores context['current_rego'] or deletes a newly created module."
+        "Write a precise prompt telling the server to create or replace the requested hotfix module and return one flat "
+        "dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
+        "Do not return update_result, upsert_result, upsert_policy_module, new_rego, or old_rego_content wrappers. "
+        "Generate real reversal logic that restores previous_rego or deletes a newly created module, then sets "
+        "result = 'reversed'."
     ),
     "L3": (
         "You are running an OPAL GoEx test at L3. Use the existing code_extension tool, not any benchmark-specific "
         "hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. "
-        "Use a detailed prompt that tells the server to use the provided policy bundle and current module context to "
-        "generate the requested outage policy change and matching reversal logic. The final result should stay flat: return the "
-        "upsert_policy_module dict directly, with any extra metadata added onto that dict."
+        "Use a detailed prompt that tells the server to use the provided incident policy context and current module state to "
+        "generate the requested outage policy change and matching reversal logic. The final result must be one flat dict with "
+        "keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not nest the mutation "
+        "under helper-specific keys."
     ),
     "L4": (
         "You are running an OPAL GoEx test at L4. Call code_extension with extension_point='policy_hotfix' "
         "and execution_mode='goex'. Ask it to create or replace the requested hotfix module and generate real "
-        "reversal logic that restores the previous file or deletes the new one. Ask for the final result to stay flat: "
-        "return the upsert_policy_module dict directly, with any metadata added onto that dict."
+        "reversal logic that restores previous_rego or deletes the new file. Require the final result to be a flat dict "
+        "with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
+        "Do not return nested helper payloads."
     ),
 }
 
@@ -309,12 +315,51 @@ def _flatten_hotfix_result(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     flattened = dict(payload)
-    nested = payload.get("upsert_result")
+    nested = None
+    for key in ("upsert_result", "update_result"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            nested = value
+            break
+    if nested is None:
+        nested = payload.get("upsert_policy_module")
+        if isinstance(nested, dict):
+            nested = {
+                "action": nested.get("action") or "updated",
+                "module_path": nested.get("module_path"),
+                "rego_content": nested.get("new_rego_content") or nested.get("rego_content"),
+                "previous_rego": nested.get("old_rego_content"),
+            }
     if isinstance(nested, dict):
         flattened = dict(nested)
-        for key in ("repo_path", "module_path", "existed", "current_rego", "summary"):
+        for key in (
+            "repo_path",
+            "module_path",
+            "existed",
+            "current_rego",
+            "summary",
+            "module_exists_before",
+            "previous_rego",
+        ):
             if key in payload and key not in flattened:
                 flattened[key] = payload[key]
+    if "rego_content" not in flattened:
+        for key in ("new_rego", "new_rego_content", "rego"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                flattened["rego_content"] = value
+                break
+    if "previous_rego" not in flattened:
+        for key in ("old_rego", "original_rego", "old_rego_content", "current_rego"):
+            value = payload.get(key)
+            if value is not None:
+                flattened["previous_rego"] = value
+                break
+    if "module_exists_before" not in flattened:
+        if "existed" in payload:
+            flattened["module_exists_before"] = bool(payload.get("existed"))
+        elif "current_rego" in payload:
+            flattened["module_exists_before"] = payload.get("current_rego") is not None
     return flattened
 
 
