@@ -8,6 +8,7 @@ Extension points:
   - post_policy_bundle: filter/transform policy bundles before serving
   - policy_hotfix:      create/update/delete emergency policy modules via Git
   - post_data_update:   validate/transform data update entries before publishing
+  - post_benchmark_candidate_feed: validate/filter benchmark candidate entries
   - post_statistics:    aggregate/alert on server statistics before returning
 
 Capabilities are grouped into classes whose methods are decorated with
@@ -448,6 +449,23 @@ post_data_update = extension_registry.register(
     )
 )
 
+post_benchmark_candidate_feed = extension_registry.register(
+    ExtensionPoint(
+        name="post_benchmark_candidate_feed",
+        description=(
+            "Post-processing hook for benchmark candidate feeds. Extension code can "
+            "validate, filter, deduplicate, or transform candidate entries before "
+            "they are returned to benchmark clients."
+        ),
+        trigger_description=(
+            "Runs when extension_level is L1+ and extension code is provided "
+            "in the benchmark candidate feed request"
+        ),
+        capabilities=list(_data_update_capabilities),
+        codegen_provider=_create_codegen_provider(),
+    )
+)
+
 post_statistics = extension_registry.register(
     ExtensionPoint(
         name="post_statistics",
@@ -590,4 +608,5 @@ def set_codegen_provider(provider):
     post_policy_bundle.codegen_provider = provider
     policy_hotfix.codegen_provider = provider
     post_data_update.codegen_provider = provider
+    post_benchmark_candidate_feed.codegen_provider = provider
     post_statistics.codegen_provider = provider

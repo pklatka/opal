@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _allow_block(*conditions: str) -> str:
+    body = "\n".join(f"    {condition}" for condition in conditions)
+    return f"allow {{\n{body}\n}}"
+
+
 def payments_outage_gate_baseline_rego() -> str:
     return """package app.incident.payments_outage_gate
 
@@ -43,6 +48,266 @@ allow {
     input.request.operation == "cache_failover"
 }
 """
+
+
+def payments_break_glass_rego() -> str:
+    return """package app.incident.break_glass
+
+default allow = false
+
+allow {
+    input.incident.severity == "sev-1"
+    input.actor.class == "oncall_responder"
+    input.flags.emergency_override == true
+    input.request.operation == "cache_failover"
+    not input.time.within_business_hours
+}
+"""
+
+
+def _module_text(package_name: str, *conditions: str) -> str:
+    return "\n".join(
+        [
+            f"package {package_name}",
+            "",
+            "default allow = false",
+            "",
+            _allow_block(*conditions),
+            "",
+        ]
+    )
+
+
+def benchmark_rejected_candidate_paths() -> list[str]:
+    return [
+        "incident/payments_replica_promote_admin.rego",
+        "incident/payments_replica_promote_no_severity.rego",
+        "incident/payments_replica_delete_cluster.rego",
+        "incident/payments_replica_promote_business_hours.rego",
+        "incident/payments_replica_promote_no_override.rego",
+        "incident/break_glass_oncall_promote_replica.rego",
+    ]
+
+
+def benchmark_valid_candidate_ids(label: str) -> list[str]:
+    if label != "opal/test2":
+        return []
+    return ["cand_02", "cand_06", "cand_11"]
+
+
+def benchmark_fixture_policy_modules() -> dict[str, str]:
+    modules = {
+        "incident/break_glass.rego": payments_break_glass_rego(),
+        "incident/break_glass_platform_admin.rego": _module_text(
+            "app.incident.break_glass_platform_admin",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "platform_admin"',
+            'input.request.operation == "cache_failover"',
+        ),
+        "incident/break_glass_oncall_business_hours.rego": _module_text(
+            "app.incident.break_glass_oncall_business_hours",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "oncall_responder"',
+            'input.flags.emergency_override == true',
+            'input.request.operation == "cache_failover"',
+            "input.time.within_business_hours",
+        ),
+        "incident/break_glass_oncall_no_override.rego": _module_text(
+            "app.incident.break_glass_oncall_no_override",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "oncall_responder"',
+            'input.request.operation == "cache_failover"',
+            "not input.time.within_business_hours",
+        ),
+        "incident/break_glass_oncall_promote_replica.rego": _module_text(
+            "app.incident.break_glass_oncall_promote_replica",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "oncall_responder"',
+            'input.flags.emergency_override == true',
+            'input.request.operation == "promote_replica"',
+        ),
+        "incident/payments_replica_promote_admin.rego": _module_text(
+            "app.incident.payments_replica_promote_admin",
+            'input.actor.class == "platform_admin"',
+            'input.request.operation == "promote_replica"',
+        ),
+        "incident/payments_replica_promote_no_severity.rego": _module_text(
+            "app.incident.payments_replica_promote_no_severity",
+            'input.actor.class == "oncall_responder"',
+            'input.flags.emergency_override == true',
+            'input.request.operation == "promote_replica"',
+        ),
+        "incident/payments_replica_delete_cluster.rego": _module_text(
+            "app.incident.payments_replica_delete_cluster",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "oncall_responder"',
+            'input.flags.emergency_override == true',
+            'input.request.operation == "delete_cluster"',
+        ),
+        "incident/payments_replica_promote_business_hours.rego": _module_text(
+            "app.incident.payments_replica_promote_business_hours",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "oncall_responder"',
+            'input.flags.emergency_override == true',
+            'input.request.operation == "promote_replica"',
+            "input.time.within_business_hours",
+        ),
+        "incident/payments_replica_promote_no_override.rego": _module_text(
+            "app.incident.payments_replica_promote_no_override",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "oncall_responder"',
+            'input.request.operation == "promote_replica"',
+        ),
+        "audit/cache_failover_observer.rego": _module_text(
+            "app.audit.cache_failover_observer",
+            'input.request.operation == "view_incident"',
+            'input.actor.class == "auditor"',
+        ),
+        "finance/payments_approver.rego": _module_text(
+            "app.finance.payments_approver",
+            'input.actor.class == "finance_manager"',
+            'input.request.operation == "approve_wire"',
+        ),
+        "staging/break_glass.rego": _module_text(
+            "app.staging.break_glass",
+            'input.environment == "staging"',
+            'input.request.operation == "cache_failover"',
+        ),
+        "audit/directory_readonly.rego": _module_text(
+            "app.audit.directory_readonly",
+            'input.actor.class == "auditor"',
+            'input.request.operation == "read_directory"',
+        ),
+        "finance/report_export.rego": _module_text(
+            "app.finance.report_export",
+            'input.actor.class == "finance_analyst"',
+            'input.request.operation == "export_report"',
+        ),
+        "staging/feature_flag_override.rego": _module_text(
+            "app.staging.feature_flag_override",
+            'input.environment == "staging"',
+            'input.request.operation == "toggle_feature_flag"',
+        ),
+    }
+
+    for idx in range(1, 16):
+        modules[f"incident/break_glass_variant_{idx:02d}.rego"] = _module_text(
+            f"app.incident.break_glass_variant_{idx:02d}",
+            'input.incident.severity == "sev-1"',
+            'input.actor.class == "oncall_responder"',
+            'input.flags.emergency_override == true',
+            'input.request.operation == "cache_failover"',
+            "not input.time.within_business_hours" if idx % 5 == 0 else "input.time.within_business_hours",
+        )
+    for idx in range(1, 13):
+        modules[f"incident/payments_replica_variant_{idx:02d}.rego"] = _module_text(
+            f"app.incident.payments_replica_variant_{idx:02d}",
+            'input.incident.severity == "sev-1"' if idx % 2 == 0 else 'input.incident.severity == "sev-2"',
+            'input.actor.class == "oncall_responder"' if idx % 3 else 'input.actor.class == "platform_admin"',
+            'input.flags.emergency_override == true' if idx % 4 else 'input.flags.emergency_override == false',
+            'input.request.operation == "promote_replica"' if idx % 5 else 'input.request.operation == "delete_cluster"',
+        )
+    for idx in range(1, 13):
+        modules[f"audit/filler_{idx:02d}.rego"] = _module_text(
+            f"app.audit.filler_{idx:02d}",
+            'input.actor.class == "auditor"',
+            f'input.request.operation == "audit_action_{idx:02d}"',
+        )
+    for idx in range(1, 13):
+        modules[f"finance/filler_{idx:02d}.rego"] = _module_text(
+            f"app.finance.filler_{idx:02d}",
+            'input.actor.class == "finance_manager"',
+            f'input.request.operation == "finance_action_{idx:02d}"',
+        )
+    for idx in range(1, 13):
+        modules[f"staging/filler_{idx:02d}.rego"] = _module_text(
+            f"app.staging.filler_{idx:02d}",
+            'input.environment == "staging"',
+            f'input.request.operation == "staging_action_{idx:02d}"',
+        )
+    return modules
+
+
+def benchmark_data_candidates(label: str) -> list[dict[str, Any]]:
+    if label != "opal/test2":
+        return []
+    candidates = [
+        {"candidate_id": "cand_01", "topics": ["incident_access"], "dst_path": "/incident/access", "url": "http://staging-benchmark-data:8081/v1/incidents/sev1/access-grants", "save_method": "PUT", "valid": False, "reason": "staging_host"},
+        {"candidate_id": "cand_02", "topics": ["incident_access"], "dst_path": "/incident/access", "url": "http://opal-benchmark-data:8081/v1/incidents/sev1/access-grants", "save_method": "PUT", "valid": True, "reason": "production_safe"},
+        {"candidate_id": "cand_03", "topics": ["policy_data"], "dst_path": "/incident/access", "url": "http://opal-benchmark-data:8081/v1/incidents/sev1/access-grants", "save_method": "PUT", "valid": False, "reason": "wrong_topic"},
+        {"candidate_id": "cand_04", "topics": ["incident_access"], "dst_path": "/incident/access/legacy", "url": "http://opal-benchmark-data:8081/v1/incidents/sev1/access-grants", "save_method": "PUT", "valid": False, "reason": "wrong_destination_path"},
+        {"candidate_id": "cand_05", "topics": ["incident_access"], "dst_path": "/incident/access", "url": "http://opal-benchmark-data:8081/v1/incidents/sev0/access-grants", "save_method": "PUT", "valid": False, "reason": "duplicate_older_incident"},
+        {"candidate_id": "cand_06", "topics": ["directory_sync"], "dst_path": "/directory/emergency/groups", "url": "http://opal-benchmark-data:8081/v1/directory/emergency/groups", "save_method": "PUT", "valid": True, "reason": "production_safe"},
+        {"candidate_id": "cand_07", "topics": ["directory_sync"], "dst_path": "/directory/emergency/groups", "url": "http://opal-benchmark-data:8081/v1/directory/emergency/groups", "save_method": "PATCH", "valid": False, "reason": "wrong_save_method"},
+        {"candidate_id": "cand_08", "topics": ["audit_logs"], "dst_path": "/audit/incident/raw", "url": "http://opal-benchmark-data:8081/v1/audit/incidents/raw", "save_method": "PUT", "valid": False, "reason": "disallowed_audit_topic"},
+        {"candidate_id": "cand_09", "topics": ["feature_flags"], "dst_path": "/feature_flags/cache_failover", "url": "ftp://opal-benchmark-data:8081/v1/feature-flags/cache-failover", "save_method": "PUT", "valid": False, "reason": "invalid_url_scheme"},
+        {"candidate_id": "cand_10", "topics": ["directory_sync"], "dst_path": "/directory/groups", "url": "http://opal-benchmark-data:8081/v1/directory/emergency/groups", "save_method": "PUT", "valid": False, "reason": "wrong_directory_path"},
+        {"candidate_id": "cand_11", "topics": ["feature_flags"], "dst_path": "/feature_flags/cache_failover", "url": "http://opal-benchmark-data:8081/v1/feature-flags/cache-failover", "save_method": "PUT", "valid": True, "reason": "production_safe"},
+        {"candidate_id": "cand_12", "topics": ["compliance_audit"], "dst_path": "/compliance/audit/failover", "url": "http://opal-benchmark-data:8081/v1/compliance/audit/failover", "save_method": "PUT", "valid": False, "reason": "disallowed_compliance_topic"},
+    ]
+    for idx in range(13, 73):
+        mod = idx % 8
+        if mod == 0:
+            topic = ["incident_access"]
+            dst_path = "/incident/access"
+            url = f"http://staging-benchmark-data:8081/v1/incidents/sev1/access-grants/{idx}"
+            reason = "staging_host"
+        elif mod == 1:
+            topic = ["policy_data"]
+            dst_path = "/incident/access"
+            url = f"http://opal-benchmark-data:8081/v1/incidents/sev1/access-grants/{idx}"
+            reason = "wrong_topic"
+        elif mod == 2:
+            topic = ["incident_access"]
+            dst_path = f"/incident/access/archive/{idx}"
+            url = f"http://opal-benchmark-data:8081/v1/incidents/sev1/access-grants/{idx}"
+            reason = "wrong_destination_path"
+        elif mod == 3:
+            topic = ["directory_sync"]
+            dst_path = "/directory/emergency/groups"
+            url = f"http://opal-benchmark-data:8081/v1/directory/legacy/groups/{idx}"
+            reason = "duplicate_older_incident"
+        elif mod == 4:
+            topic = ["directory_sync"]
+            dst_path = f"/directory/groups/{idx}"
+            url = f"http://opal-benchmark-data:8081/v1/directory/emergency/groups/{idx}"
+            reason = "wrong_directory_path"
+        elif mod == 5:
+            topic = ["feature_flags"]
+            dst_path = "/feature_flags/cache_failover"
+            url = f"ftp://opal-benchmark-data:8081/v1/feature-flags/cache-failover/{idx}"
+            reason = "invalid_url_scheme"
+        elif mod == 6:
+            topic = ["audit_logs"]
+            dst_path = f"/audit/incident/raw/{idx}"
+            url = f"http://opal-benchmark-data:8081/v1/audit/incidents/raw/{idx}"
+            reason = "disallowed_audit_topic"
+        else:
+            topic = ["compliance_audit"]
+            dst_path = f"/compliance/audit/failover/{idx}"
+            url = f"http://opal-benchmark-data:8081/v1/compliance/audit/failover/{idx}"
+            reason = "disallowed_compliance_topic"
+        save_method = "PATCH" if idx % 9 == 0 else "PUT"
+        candidates.append(
+            {
+                "candidate_id": f"cand_{idx:02d}",
+                "topics": topic,
+                "dst_path": dst_path,
+                "url": url,
+                "save_method": save_method,
+                "valid": False,
+                "reason": "wrong_save_method" if save_method == "PATCH" else reason,
+            }
+        )
+    return candidates
+
+
+def benchmark_policy_module_count() -> int:
+    return len(benchmark_reset_policy_modules())
+
+
+def benchmark_candidate_count(label: str) -> int:
+    return len(benchmark_data_candidates(label))
 
 
 @dataclass(frozen=True)
@@ -311,7 +576,7 @@ def benchmark_reset_entries() -> list[dict[str, Any]]:
 
 
 def benchmark_reset_policy_modules() -> dict[str, str]:
-    modules: dict[str, str] = {}
+    modules: dict[str, str] = dict(benchmark_fixture_policy_modules())
     for scenario in STANDARD_SCENARIOS.values():
         if scenario.baseline_module_path and scenario.baseline_module_rego:
             modules[scenario.baseline_module_path] = scenario.baseline_module_rego

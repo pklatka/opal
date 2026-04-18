@@ -263,22 +263,12 @@ def _build_benchmark_stats(raw_stats: dict[str, Any]) -> dict[str, Any]:
 
     alias_map = _alias_benchmark_client_ids(clients)
     client_topics: dict[str, list[str]] = {}
-    topic_subscribers: dict[str, list[str]] = {
-        topic: [] for topic in _BENCHMARK_KNOWN_TOPICS
-    }
-
     for raw_client_id, channels in clients.items():
         alias = alias_map.get(raw_client_id, raw_client_id)
         topics = _client_topics_from_channels(channels if isinstance(channels, list) else [])
         if not topics:
             continue
         client_topics[alias] = topics
-        for topic in topics:
-            if topic in topic_subscribers:
-                topic_subscribers[topic].append(alias)
-
-    for topic in topic_subscribers:
-        topic_subscribers[topic] = sorted(set(topic_subscribers[topic]))
 
     servers = raw_stats.get("servers", []) if isinstance(raw_stats, dict) else []
     server_count = len(servers) if isinstance(servers, (list, set, tuple)) else 0
@@ -286,10 +276,8 @@ def _build_benchmark_stats(raw_stats: dict[str, Any]) -> dict[str, Any]:
     return {
         "known_topics": list(_BENCHMARK_KNOWN_TOPICS),
         "client_topics": dict(sorted(client_topics.items())),
-        "topic_subscribers": topic_subscribers,
         "known_client_ids": sorted(client_topics),
         "server_count": server_count,
-        "client_count_hint": len(client_topics),
         "stable_client_ids_inferred": any(
             raw != alias for raw, alias in alias_map.items()
         ),
@@ -319,7 +307,8 @@ def _benchmark_statistics_payload(raw_payload: dict[str, Any]) -> dict[str, Any]
     payload["benchmark_guidance"] = (
         "For OPAL benchmark tasks, use benchmark_stats for stable client ids, "
         "known benchmark topics, and normalized client-to-topic membership. "
-        "Compute the requested aggregates from that normalized input instead of "
+        "Compute the requested aggregates from client_topics instead of relying on "
+        "pre-aggregated subscriber shortcuts, and "
         "reading raw control-plane topics directly unless the task explicitly asks for them."
     )
     return payload
@@ -460,11 +449,42 @@ async def get_data_sources_config() -> str:
 
 @mcp.tool(
     description=_get_desc(
+        "get_benchmark_data_candidates",
+        "Get the benchmark-only candidate data-update entries for a standard OPAL task.",
+        benchmark_note=True,
+    )
+)
+async def get_benchmark_data_candidates(
+    label: str = "opal/test2",
+    extension_level: str = "L0",
+    extension_code: str | None = None,
+    task_description: str | None = None,
+    execution_mode: str = "direct",
+    reversal_code: str | None = None,
+) -> str:
+    body: dict[str, Any] = {"extension_level": extension_level, "execution_mode": execution_mode}
+    if extension_code is not None:
+        body["extension_code"] = extension_code
+    if task_description is not None:
+        body["task_description"] = task_description
+    if reversal_code is not None:
+        body["reversal_code"] = reversal_code
+    data = await _get_with_body(
+        "/symphony/benchmark/data-candidates",
+        params={"label": label},
+        body=body,
+        headers=_client_headers(),
+    )
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool(
+    description=_get_desc(
         "get_statistics",
         "Get OPAL server statistics (connected clients, topics, replicas). "
         "In benchmark mode, the response includes benchmark_stats with "
-        "normalized client ids, topic counts, zero-subscriber topics, and "
-        "subscriber lists; use benchmark_stats instead of raw_stats unless "
+        "normalized client ids and stable client-to-topic membership; use "
+        "benchmark_stats instead of raw_stats unless "
         "the task explicitly asks for raw control-plane details.",
         benchmark_note=True,
     )

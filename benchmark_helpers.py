@@ -5,6 +5,8 @@ from typing import Any
 
 def normalize_benchmark_data_update_entry_aliases(item: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(item)
+    if "dst_path" not in normalized and isinstance(normalized.get("path"), str):
+        normalized["dst_path"] = normalized["path"]
     if "url" not in normalized and isinstance(normalized.get("source"), str):
         normalized["url"] = normalized.pop("source")
     data_source = normalized.pop("data_source", None)

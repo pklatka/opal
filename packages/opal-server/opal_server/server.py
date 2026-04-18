@@ -6,7 +6,8 @@ import traceback
 from functools import partial
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Body, Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi_websocket_pubsub.event_broadcaster import EventBroadcasterContextManager
 from opal_common.authentication.deps import JWTAuthenticator, StaticBearerAuthenticator
 from opal_common.authentication.signer import JWTSigner
@@ -41,14 +42,17 @@ from opal_server.security.api import init_security_router
 from opal_server.security.jwks import JwksStaticEndpoint
 from opal_server.statistics import OpalStatistics, init_statistics_router
 from opal_server.symphony_ext import (
+    _data_update_capabilities,
     extension_registry as symphony_registry,
     goex_registry as symphony_goex_registry,
+    post_benchmark_candidate_feed,
 )
 from opal_server.policy.module_ops import (
     delete_policy_module as delete_policy_module_from_repo,
     upsert_policy_module as upsert_policy_module_in_repo,
 )
 from opal_server.benchmark_scenarios import (
+    benchmark_data_candidates,
     benchmark_reset_delete_paths,
     benchmark_reset_entries,
     benchmark_reset_policy_modules,
@@ -93,6 +97,10 @@ def _get_repo_or_none(config):
     if not git_path.exists():
         return None
     return Repo(repo_path)
+
+
+def _default_benchmark_candidates(label: str) -> list[dict]:
+    return benchmark_data_candidates(label)
 
 
 class OpalServer:
@@ -352,7 +360,8 @@ class OpalServer:
             self.jwks_endpoint.configure_app(app)
 
         # top level routes (i.e: healthchecks)
-        from symphony import tool as symphony_tool
+        from symphony import handle_extension, tool as symphony_tool
+        from symphony.models import SymphonyExtensionBody
 
         @symphony_tool(name="healthcheck", method="GET", path="/healthcheck")
         @app.get("/healthcheck", include_in_schema=False)
@@ -438,6 +447,83 @@ class OpalServer:
                 "build_id": os.environ.get("SYMPHONY_BUILD_ID", ""),
                 "git_sha": os.environ.get("GIT_SHA", ""),
             }
+
+        @symphony_tool(
+            name="get_benchmark_data_candidates",
+            method="GET",
+            path="/symphony/benchmark/data-candidates",
+            levels=["L0", "L1", "L2", "L3", "L4"],
+            level_params={
+                "L0": ["label"],
+                "L1": ["label", "extension_level", "extension_code", "execution_mode", "reversal_code"],
+                "L2": ["label", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+                "L3": ["label", "extension_level", "task_description", "execution_mode", "reversal_code"],
+                "L4": ["label", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+            },
+        )
+        @app.get(
+            "/symphony/benchmark/data-candidates",
+            tags=["Symphony"],
+            dependencies=[Depends(authenticator)],
+        )
+        async def benchmark_data_candidates_feed(
+            label: str,
+            ext: SymphonyExtensionBody | None = Body(None),
+        ):
+            """Return benchmark candidate data-update entries with optional Symphony filtering."""
+            ext = ext or SymphonyExtensionBody()
+            candidates = _default_benchmark_candidates(label)
+            if not candidates:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"no benchmark data candidates configured for {label}",
+                )
+            candidate_context = {
+                "label": label,
+                "candidates": candidates,
+                "candidate_count": len(candidates),
+            }
+            outcome = await handle_extension(
+                level=ext.extension_level,
+                extension_code=ext.extension_code,
+                task_description=ext.task_description,
+                execution_mode=ext.execution_mode,
+                reversal_code=ext.reversal_code,
+                extension_point=post_benchmark_candidate_feed,
+                default_fn=lambda: candidates,
+                context=candidate_context,
+                all_capabilities=_data_update_capabilities,
+                goex_registry=symphony_goex_registry,
+                original_call='result = context["candidates"]',
+                default_source=_default_benchmark_candidates,
+                endpoint_path="/symphony/benchmark/data-candidates",
+                trigger_condition=lambda res: bool(ext.extension_code) or bool(ext.task_description),
+            )
+
+            response = {
+                "ok": True,
+                "label": label,
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+            }
+            if outcome.needs_extension:
+                response["needs_extension"] = True
+                if outcome.extension_context:
+                    response["extension_context"] = outcome.extension_context
+                return JSONResponse(response)
+
+            ext_result = outcome.ext_result
+            if ext_result.triggered and isinstance(outcome.results, list):
+                response["candidates"] = outcome.results
+                response["candidate_count"] = len(outcome.results)
+                response["extension_triggered"] = True
+                response["generated_code"] = ext_result.generated_code
+                response["endpoint_source"] = ext_result.endpoint_source
+            if ext_result.goex_record_id:
+                response["goex_record_id"] = ext_result.goex_record_id
+                response["goex_mode"] = ext.execution_mode == "goex"
+                response["goex_reversal_code"] = ext_result.goex_reversal_code
+            return JSONResponse(response)
 
         # Register Symphony context providers for L4 code_extension
         from opal_server.symphony_ext import (
