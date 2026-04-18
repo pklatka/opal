@@ -20,6 +20,8 @@ import os
 import re
 
 from git.repo import Repo
+from opal_common.logger import logger
+from opal_server.config import opal_server_config
 
 from symphony import (
     ExtensionPoint,
@@ -54,6 +56,28 @@ def _create_codegen_provider():
     if model:
         kwargs["model"] = model
     return create_provider(provider_name, **kwargs)
+
+
+_policy_hotfix_notifier = None
+
+
+def set_policy_hotfix_notifier(notifier):
+    """Register a best-effort callback used after hotfix mutations."""
+    global _policy_hotfix_notifier
+    _policy_hotfix_notifier = notifier
+
+
+def _emit_policy_hotfix_notification() -> None:
+    notifier = _policy_hotfix_notifier
+    if notifier is None:
+        return
+    try:
+        notifier()
+    except Exception:
+        logger.warning(
+            "Failed to publish policy hotfix notification",
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -159,12 +183,14 @@ class PolicyHotfixCapabilities:
     ) -> dict:
         """Create or replace a Rego module and commit it."""
         try:
-            return upsert_policy_module_in_repo(
+            result = upsert_policy_module_in_repo(
                 _repo_from_path(repo_path),
                 module_path,
                 rego_content,
                 commit_message,
             )
+            _emit_policy_hotfix_notification()
+            return result
         except (PolicyModulePathError, ValueError, FileNotFoundError) as exc:
             raise RuntimeError(str(exc)) from exc
 
@@ -178,12 +204,14 @@ class PolicyHotfixCapabilities:
     ) -> dict:
         """Delete a Rego module and commit the removal."""
         try:
-            return delete_policy_module_from_repo(
+            result = delete_policy_module_from_repo(
                 _repo_from_path(repo_path),
                 module_path,
                 commit_message,
                 missing_ok=missing_ok,
             )
+            _emit_policy_hotfix_notification()
+            return result
         except (PolicyModulePathError, ValueError, FileNotFoundError) as exc:
             raise RuntimeError(str(exc)) from exc
 

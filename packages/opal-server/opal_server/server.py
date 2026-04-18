@@ -232,6 +232,7 @@ class OpalServer:
 
         self.watcher: PolicyWatcherTask = None
         self.leadership_lock: Optional[NamedLock] = None
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
 
         if opal_server_config.SCOPES:
             self._redis_db = RedisDB(opal_server_config.REDIS_URL)
@@ -402,6 +403,9 @@ class OpalServer:
                         rego_content,
                         f"Restore benchmark baseline module {module_path}",
                     )
+                await self.pubsub.endpoint.publish(
+                    opal_server_config.POLICY_REPO_WEBHOOK_TOPIC
+                )
             except Exception as exc:
                 raise HTTPException(
                     status_code=500,
@@ -416,16 +420,39 @@ class OpalServer:
                 "policy_modules_removed": benchmark_reset_delete_paths(),
             }
 
+        @app.get(
+            "/symphony/benchmark/info",
+            tags=["Symphony"],
+            dependencies=[Depends(authenticator)],
+        )
+        async def benchmark_info():
+            """Return effective benchmark stack configuration for drift/debug checks."""
+            return {
+                "ok": True,
+                "policy_repo_url": opal_server_config.POLICY_REPO_URL,
+                "policy_repo_branch": os.environ.get("OPAL_POLICY_REPO_MAIN_BRANCH", ""),
+                "policy_repo_manifest_path": opal_server_config.POLICY_REPO_MANIFEST_PATH,
+                "policy_webhook_topic": opal_server_config.POLICY_REPO_WEBHOOK_TOPIC,
+                "codegen_provider": os.environ.get("SYMPHONY_CODEGEN_PROVIDER", ""),
+                "codegen_model": os.environ.get("SYMPHONY_CODEGEN_MODEL", ""),
+                "build_id": os.environ.get("SYMPHONY_BUILD_ID", ""),
+                "git_sha": os.environ.get("GIT_SHA", ""),
+            }
+
         # Register Symphony context providers for L4 code_extension
         from opal_server.symphony_ext import (
             set_statistics_context_provider,
             set_policy_bundle_context_provider,
+            set_policy_hotfix_notifier,
             set_codegen_provider,
         )
         if self.opal_statistics is not None:
             set_statistics_context_provider(lambda: self.opal_statistics.state)
         set_policy_bundle_context_provider(
             lambda: _get_repo_or_none(opal_server_config)
+        )
+        set_policy_hotfix_notifier(
+            self._publish_policy_hotfix_notification
         )
 
         # Configure server-side code generation provider (L2/L3/L4)
@@ -454,6 +481,7 @@ class OpalServer:
         @app.on_event("startup")
         async def startup_event():
             logger.info("*** OPAL Server Startup ***")
+            self._main_loop = asyncio.get_running_loop()
 
             try:
                 self._task = asyncio.create_task(self.start_server_background_tasks())
@@ -470,6 +498,26 @@ class OpalServer:
             await self.stop_server_background_tasks()
 
         return app
+
+    def _publish_policy_hotfix_notification(self):
+        async def _publish():
+            await self.pubsub.endpoint.publish(opal_server_config.POLICY_REPO_WEBHOOK_TOPIC)
+
+        loop = self._main_loop
+        if loop is not None and loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                return loop.create_task(_publish())
+            return asyncio.run_coroutine_threadsafe(_publish(), loop)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_publish())
+        return running_loop.create_task(_publish())
 
     async def start_server_background_tasks(self):
         """Starts the background processes (as asyncio tasks) if such are

@@ -278,13 +278,31 @@ def _fetch_hotfix_module(api_url: str, module_path: str = HOTFIX_MODULE_PATH) ->
     resp = httpx.get(
         f"{api_url.rstrip('/')}/policy",
         headers=_auth_headers(),
-        params={"path": module_path},
         timeout=30,
     )
     resp.raise_for_status()
     payload = resp.json()
     modules = payload.get("policy_modules", [])
-    return modules[0] if modules else None
+    for module in modules:
+        if module.get("path") == module_path:
+            return module
+    return None
+
+
+def _fetch_stack_info(api_url: str) -> dict[str, Any] | None:
+    try:
+        resp = httpx.get(
+            f"{api_url.rstrip('/')}/symphony/benchmark/info",
+            headers=_auth_headers(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception:
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
 
 
 def _flatten_hotfix_result(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -575,6 +593,193 @@ def _wait_for_client_decision(
     return False
 
 
+def _client_policy_status(
+    namespace: str,
+    kube_context: str | None,
+    *,
+    app_name: str,
+    module_path: str,
+) -> tuple[int, str]:
+    pod = _client_pod(namespace, kube_context, app_name)
+    script = (
+        "import json, sys, urllib.error, urllib.request\n"
+        "url='http://127.0.0.1:8181/v1/policies/' + sys.argv[1]\n"
+        "try:\n"
+        "    data = urllib.request.urlopen(url, timeout=10).read().decode('utf-8')\n"
+        "    print(json.dumps({'status_code': 200, 'body': data}))\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    print(json.dumps({'status_code': exc.code, 'body': exc.read().decode('utf-8')}))\n"
+    )
+    cmd = _kubectl_base(kube_context) + [
+        "-n",
+        namespace,
+        "exec",
+        pod,
+        "--",
+        "python",
+        "-c",
+        script,
+        module_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    payload = json.loads(result.stdout.strip())
+    return int(payload.get("status_code", 500)), str(payload.get("body", ""))
+
+
+def _client_health(
+    namespace: str,
+    kube_context: str | None,
+    *,
+    app_name: str,
+) -> tuple[int, str]:
+    pod = _client_pod(namespace, kube_context, app_name)
+    script = (
+        "import json, urllib.error, urllib.request\n"
+        "url='http://127.0.0.1:7000/healthy'\n"
+        "try:\n"
+        "    data = urllib.request.urlopen(url, timeout=10).read().decode('utf-8')\n"
+        "    print(json.dumps({'status_code': 200, 'body': data}))\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    print(json.dumps({'status_code': exc.code, 'body': exc.read().decode('utf-8')}))\n"
+    )
+    cmd = _kubectl_base(kube_context) + [
+        "-n",
+        namespace,
+        "exec",
+        pod,
+        "--",
+        "python",
+        "-c",
+        script,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    payload = json.loads(result.stdout.strip())
+    return int(payload.get("status_code", 500)), str(payload.get("body", ""))
+
+
+def _trigger_client_policy_refresh(
+    namespace: str,
+    kube_context: str | None,
+    *,
+    app_name: str,
+) -> None:
+    pod = _client_pod(namespace, kube_context, app_name)
+    script = (
+        "import json, urllib.error, urllib.request\n"
+        "req = urllib.request.Request('http://127.0.0.1:7000/policy-updater/trigger', data=b'', method='POST')\n"
+        "try:\n"
+        "    data = urllib.request.urlopen(req, timeout=20).read().decode('utf-8')\n"
+        "    print(json.dumps({'status_code': 200, 'body': data}))\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    print(json.dumps({'status_code': exc.code, 'body': exc.read().decode('utf-8')}))\n"
+    )
+    cmd = _kubectl_base(kube_context) + [
+        "-n",
+        namespace,
+        "exec",
+        pod,
+        "--",
+        "python",
+        "-c",
+        script,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+    payload = json.loads(result.stdout.strip())
+    status_code = int(payload.get("status_code", 500))
+    if status_code != 200:
+        raise RuntimeError(
+            f"policy refresh failed for {app_name}: status={status_code}, body={payload.get('body', '')}"
+        )
+
+
+def _refresh_scenario_client(
+    namespace: str | None,
+    kube_context: str | None,
+    scenario: Any,
+) -> None:
+    if not namespace:
+        return
+    app_name = scenario.decision_check.client_app if scenario.decision_check is not None else "opal-client-authz-a"
+    _trigger_client_policy_refresh(namespace, kube_context, app_name=app_name)
+
+
+def _decision_diagnostics(
+    api_url: str,
+    namespace: str,
+    kube_context: str | None,
+    *,
+    scenario: Any,
+) -> str:
+    parts: list[str] = []
+    if scenario.decision_check is None:
+        return ""
+    try:
+        pos_has_result, pos_value = _client_decision(
+            namespace,
+            kube_context,
+            client_app=scenario.decision_check.client_app,
+            package_path=scenario.decision_check.package_path,
+            input_payload=scenario.decision_check.positive_input,
+        )
+        parts.append(f"positive(has_result={pos_has_result}, value={pos_value})")
+    except Exception as exc:
+        parts.append(f"positive_error={exc!s}")
+    try:
+        neg_has_result, neg_value = _client_decision(
+            namespace,
+            kube_context,
+            client_app=scenario.decision_check.client_app,
+            package_path=scenario.decision_check.package_path,
+            input_payload=scenario.decision_check.negative_input,
+        )
+        parts.append(f"negative(has_result={neg_has_result}, value={neg_value})")
+    except Exception as exc:
+        parts.append(f"negative_error={exc!s}")
+    try:
+        status_code, body = _client_policy_status(
+            namespace,
+            kube_context,
+            app_name=scenario.decision_check.client_app,
+            module_path=scenario.module_path,
+        )
+        parts.append(f"client_policy_status={status_code}")
+        parts.append(f"client_policy_body={body[:300]}")
+    except Exception as exc:
+        parts.append(f"client_policy_error={exc!s}")
+    try:
+        status_code, body = _client_health(
+            namespace,
+            kube_context,
+            app_name=scenario.decision_check.client_app,
+        )
+        parts.append(f"client_healthy_status={status_code}")
+        parts.append(f"client_healthy_body={body[:300]}")
+    except Exception as exc:
+        parts.append(f"client_healthy_error={exc!s}")
+    try:
+        module = _fetch_hotfix_module(api_url, scenario.module_path)
+        parts.append(
+            "server_module="
+            + json.dumps(
+                {
+                    "path": module.get("path") if module else None,
+                    "package_name": module.get("package_name") if module else None,
+                    "rego_preview": (module.get("rego", "")[:200] if module else None),
+                },
+                sort_keys=True,
+            )
+        )
+    except Exception as exc:
+        parts.append(f"server_module_error={exc!s}")
+    return ", ".join(parts)
+
+
 def run_test(args: argparse.Namespace) -> bool:
     try:
         api_url = _resolve_api_url(args)
@@ -603,6 +808,21 @@ def run_test(args: argparse.Namespace) -> bool:
         print(f"  {FAIL}  healthcheck failed: {exc}")
         return False
     print(f"  {PASS}  healthcheck ok")
+    stack_info = _fetch_stack_info(api_url)
+    if stack_info:
+        print(
+            "  stack_info: "
+            + json.dumps(
+                {
+                    "policy_repo_url": stack_info.get("policy_repo_url"),
+                    "policy_repo_branch": stack_info.get("policy_repo_branch"),
+                    "policy_repo_manifest_path": stack_info.get("policy_repo_manifest_path"),
+                    "codegen_provider": stack_info.get("codegen_provider"),
+                    "build_id": stack_info.get("build_id"),
+                },
+                sort_keys=True,
+            )
+        )
 
     try:
         reset = _reset_benchmark_state(api_url)
@@ -610,6 +830,12 @@ def run_test(args: argparse.Namespace) -> bool:
         print(f"  {FAIL}  could not reset benchmark state: {exc}")
         return False
     print(f"  {PASS}  benchmark reset ok: {json.dumps(reset, ensure_ascii=True)}")
+    if args.namespace:
+        try:
+            _refresh_scenario_client(args.namespace, args.kube_context, scenario)
+        except Exception as exc:
+            print(f"  {FAIL}  benchmark reset client refresh failed: {exc}")
+            return False
 
     print(
         f"\n[2/5] Running agent (case={args.case}, level={args.level}, execution_mode={args.execution_mode})..."
@@ -699,6 +925,11 @@ def run_test(args: argparse.Namespace) -> bool:
             f"(action={action or 'unknown'})"
         )
         if args.namespace:
+            try:
+                _refresh_scenario_client(args.namespace, args.kube_context, scenario)
+            except Exception as exc:
+                print(f"  {FAIL}  client refresh failed: {exc}")
+                return False
             if scenario.decision_check is not None:
                 print(f"\n[3b/5] Checking decision on {scenario.decision_check.client_app}...")
                 try:
@@ -748,6 +979,11 @@ def run_test(args: argparse.Namespace) -> bool:
             print(f"  {FAIL}  direct-mode cleanup failed: {exc}")
             return False
         if args.namespace:
+            try:
+                _refresh_scenario_client(args.namespace, args.kube_context, scenario)
+            except Exception as exc:
+                print(f"  {FAIL}  client cleanup refresh failed: {exc}")
+                return False
             if scenario.decision_check is not None:
                 try:
                     cleared = _wait_for_client_decision(
@@ -846,6 +1082,11 @@ def run_test(args: argparse.Namespace) -> bool:
             f"(action={action or 'unknown'})"
         )
     if args.namespace:
+        try:
+            _refresh_scenario_client(args.namespace, args.kube_context, scenario)
+        except Exception as exc:
+            print(f"  {FAIL}  client refresh failed: {exc}")
+            return False
         if scenario.decision_check is not None:
             print(f"\n[4b/5] Checking decision on {scenario.decision_check.client_app}...")
             try:
@@ -869,6 +1110,7 @@ def run_test(args: argparse.Namespace) -> bool:
                 return False
             if not propagated or negative:
                 print(f"  {FAIL}  outage decision did not converge to the expected state.")
+                print(f"  diagnostics: {_decision_diagnostics(api_url, args.namespace, args.kube_context, scenario=scenario)}")
                 return False
             print(f"  {PASS}  outage decision propagated to {scenario.decision_check.client_app}")
         elif scenario.expect_module_presence:
@@ -906,6 +1148,11 @@ def run_test(args: argparse.Namespace) -> bool:
         print(f"  {FAIL}  Hotfix module still exists after reversal.")
         return False
     if args.namespace:
+        try:
+            _refresh_scenario_client(args.namespace, args.kube_context, scenario)
+        except Exception as exc:
+            print(f"  {FAIL}  client reversal refresh failed: {exc}")
+            return False
         if scenario.decision_check is not None:
             try:
                 cleared = _wait_for_client_decision(
@@ -921,6 +1168,7 @@ def run_test(args: argparse.Namespace) -> bool:
                 return False
             if not cleared:
                 print(f"  {FAIL}  outage decision did not return to the baseline state after reversal.")
+                print(f"  diagnostics: {_decision_diagnostics(api_url, args.namespace, args.kube_context, scenario=scenario)}")
                 return False
         elif scenario.expect_module_presence:
             try:

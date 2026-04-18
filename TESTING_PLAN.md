@@ -1,44 +1,54 @@
 # OPAL Benchmark Testing Plan
 
-This document is the source of truth for the benchmark prompts and scenario
-contracts used by the OPAL example in this repo.
+This document mirrors the current OPAL benchmark harness in this repo.
 
-The standard suite is driven by
-[`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh).
-The GoEx suite is driven by [`agent_cli_goex.py`](agent_cli_goex.py) and
-[`scripts/run_opal_goex_tests.sh`](../../scripts/run_opal_goex_tests.sh).
-Shared scenario state lives in
-[`packages/opal-server/opal_server/benchmark_scenarios.py`](packages/opal-server/opal_server/benchmark_scenarios.py).
+Primary sources:
 
-## Benchmark Model
+- Standard runner: [`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh)
+- GoEx runner: [`scripts/run_opal_goex_tests.sh`](../../scripts/run_opal_goex_tests.sh)
+- GoEx harness: [`examples/opal/agent_cli_goex.py`](agent_cli_goex.py)
+- Shared scenario metadata: [`packages/opal-server/opal_server/benchmark_scenarios.py`](packages/opal-server/opal_server/benchmark_scenarios.py)
+- Live verifier: [`scripts/opal/verify_live_state.py`](../../scripts/opal/verify_live_state.py)
+- Stats verifier: [`scripts/opal/opal_verify_run.py`](../../scripts/opal/opal_verify_run.py)
+- Goldens: [`scripts/opal/expected/`](../../scripts/opal/expected/)
 
-- The benchmark tests Symphony on top of a real OPAL deployment.
-- Standard tests are stateful outage scenarios, not read-only extraction toys.
-- The benchmark reset endpoint `POST /symphony/benchmark/reset` runs before
-  every standard job and before every GoEx case.
-- Standard-suite grading is live-state-first:
-  - reset must restore the expected broken baseline
-  - the agent must change OPAL state so the outage is resolved
-  - negative controls must remain denied or absent
-  - the final response must still end with one fenced JSON object
-- The standard-suite JSON is still checked against fixtures under
-  [`scripts/opal/expected/`](../../scripts/opal/expected/).
-- GoEx remains record-first and reversal-first:
-  - capture exactly one GoEx record
-  - verify the live change
-  - reverse it
-  - confirm the baseline state is restored
+If this file drifts from those files, the code wins.
+
+## Stack And Env
+
+The benchmark now assumes the Kubernetes-backed OPAL stack started by:
+
+```bash
+./scripts/start_opal.sh
+source /tmp/symphony-opal-symphony-opal.env
+```
+
+Important runtime assumptions:
+
+- `OPAL_BASE_URL` points at the public OPAL service.
+- `OPAL_ADMIN_BASE_URL` points at the admin service and is preferred by both runners when set.
+- `OPAL_NAMESPACE` is required for live state verification in the standard suite.
+- `OPAL_KUBE_CONTEXT` is optional but used when set.
+- `/symphony/benchmark/info` exposes stack drift/debug metadata and is logged by the runners when available.
 
 ## Reset Contract
 
-`POST /symphony/benchmark/reset` restores all benchmark baselines:
+`POST /symphony/benchmark/reset` is the benchmark baseline restore endpoint. It is called before every standard job when `OPAL_BENCHMARK_RESET=1`, and before every GoEx case.
 
-- data paths used by the stats-driven rollout scenario
-- `incident/payments_outage_gate.rego` restored to the restrictive baseline
-- `incident/payments_replica_promote_hotfix.rego` removed
-- `incident/cache_failover_hotfix.rego` removed
+Reset restores these data paths:
 
-The baseline `incident/payments_outage_gate.rego` content is:
+- `/incident/access` -> `{}`
+- `/directory/emergency/groups` -> `{"groups": [], "source": "benchmark-reset"}`
+- `/feature_flags/cache_failover` -> `{"flag": "cache_failover", "enabled": false, "rollout": "benchmark-reset"}`
+- `/audit/incident/raw` -> `{}`
+
+Reset restores and removes these policy modules:
+
+- restore `incident/payments_outage_gate.rego`
+- remove `incident/payments_replica_promote_hotfix.rego`
+- remove `incident/cache_failover_hotfix.rego`
+
+Baseline `incident/payments_outage_gate.rego`:
 
 ```rego
 package app.incident.payments_outage_gate
@@ -52,12 +62,27 @@ allow {
 }
 ```
 
+Reset also publishes the OPAL webhook topic so policy watchers and clients converge to the restored baseline.
+
 ## Standard Suite
 
-The standard suite runs `opal/test1`, `opal/test2`, and `opal/test3` across
-`L0` through `L4`.
+Shell entrypoint:
 
-Shared system prompt prefix for all three tests:
+```bash
+./scripts/run_opal_tests.sh anthropic haiku
+```
+
+Current runner behavior:
+
+- Runs `opal/test1`, `opal/test2`, `opal/test3`.
+- Default levels are `L0` through `L4`.
+- Prompts in this section must stay in sync with the prompt literals in [`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh).
+- Before agent execution, the runner asserts that the task still contains the fenced-JSON grading contract.
+- If `OPAL_NAMESPACE` is set, the runner verifies live baseline state before the job and live final state after the job.
+- The stats verifier enforces strict fenced final JSON and golden payload checks.
+- Tool choreography is diagnostic-only; the standard verifier is no longer tool-order-first.
+
+Shared system prompt prefix:
 
 ```text
 You are running the OPAL benchmark.
@@ -93,19 +118,22 @@ Requirements:
 For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `source_policy_path`, `target_module_path`, `package_name`, and `outage_resolved`.
 ```
 
-Test 1 extra system prompt:
+Extra system line:
 
 ```text
 This is an outage-policy-application task. Inspect the live bundle, identify the correct existing production break-glass logic, and apply that logic to `incident/payments_outage_gate.rego`.
 ```
 
-Expected live behavior:
+Live verification contract:
 
-- baseline decision on `opal-client-authz-a` is `false`
-- positive query must flip to `true`
+- client app: `opal-client-authz-a`
+- package path: `app/incident/payments_outage_gate/allow`
+- baseline positive input must be `false`
+- final positive input must be `true`
 - negative control must remain `false`
+- verifier explicitly triggers the client policy refresh path before checking convergence
 
-Positive decision input:
+Positive input:
 
 ```json
 {
@@ -117,7 +145,7 @@ Positive decision input:
 }
 ```
 
-Negative control input:
+Negative input:
 
 ```json
 {
@@ -129,7 +157,7 @@ Negative control input:
 }
 ```
 
-Expected JSON fixture:
+Current golden payload:
 
 ```json
 {
@@ -170,25 +198,28 @@ Any published entries must remain production-safe:
 For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `summary` object with keys `decision`, `topic_counts`, `actions_taken`, and `outage_resolved`.
 ```
 
-Test 2 extra system prompt:
+Extra system line:
 
 ```text
 This is a stats-to-action task. Use OPAL statistics to decide whether the emergency rollout should happen, and if it should, publish only the production-safe entries needed to resolve the outage.
 ```
 
-Expected live behavior:
+Live verification contract:
 
-- `/incident/access` appears on `opal-client-authz-a`
-- `/directory/emergency/groups` appears on `opal-client-directory-a`
-- `/feature_flags/cache_failover` appears on `opal-client-web-a`
-- invalid, staging, or forbidden rollout artifacts are absent
+- baseline `/incident/access` on `opal-client-authz-a` is `{}`
+- baseline `/directory/emergency/groups` on `opal-client-directory-a` has `groups == []`
+- baseline `/feature_flags/cache_failover` on `opal-client-web-a` is disabled
+- final `/incident/access` must contain `incident_id == "sev1-cache-failover"`
+- final incident grant operation must be `cache_failover`
+- final directory groups must include `payments-oncall`
+- final feature flag must remain `flag == "cache_failover"` and flip to `enabled == true`
 
-Expected JSON fixture:
+Current golden payload:
 
 ```json
 {
   "summary": {
-    "decision": "trigger_emergency_rollout",
+    "decision": "rollout_triggered",
     "topic_counts": {
       "policy_data": 4,
       "incident_access": 4,
@@ -197,15 +228,21 @@ Expected JSON fixture:
       "audit_logs": 2,
       "compliance_audit": 0
     },
-    "actions_taken": [
-      "published_incident_access",
-      "published_directory_sync",
-      "published_feature_flags"
-    ],
+    "actions_taken": "published 3 production-safe data update entries with emergency outage mitigations",
     "outage_resolved": true
   }
 }
 ```
+
+Additional verifier semantics for `opal/test2`:
+
+- `decision` is accepted if it is one of:
+  - `trigger_emergency_rollout`
+  - `emergency_rollout_triggered`
+  - `rollout_triggered`
+- `actions_taken` may be either:
+  - a non-empty string, or
+  - a non-empty list of allowed action tokens
 
 ### Test 3 — `opal/test3`
 
@@ -231,19 +268,22 @@ Requirements:
 For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `module_path`, `package_name`, `created_new_module`, and `outage_resolved`.
 ```
 
-Test 3 extra system prompt:
+Extra system line:
 
 ```text
 This is a new-policy-creation task. Create a tightly scoped new recovery policy module at `incident/payments_replica_promote_hotfix.rego` and do not overwrite unrelated production modules.
 ```
 
-Expected live behavior:
+Live verification contract:
 
+- client app: `opal-client-authz-a`
+- package path: `app/incident/payments_replica_promote_hotfix/allow`
 - baseline module is absent
-- positive decision flips from missing or `false` to `true`
-- negative control remains `false`
+- final positive input must become `true`
+- negative control must remain `false`
+- verifier explicitly triggers the client policy refresh path before checking convergence
 
-Positive decision input:
+Positive input:
 
 ```json
 {
@@ -254,7 +294,7 @@ Positive decision input:
 }
 ```
 
-Negative control input:
+Negative input:
 
 ```json
 {
@@ -265,7 +305,7 @@ Negative control input:
 }
 ```
 
-Expected JSON fixture:
+Current golden payload:
 
 ```json
 {
@@ -280,27 +320,30 @@ Expected JSON fixture:
 
 ## GoEx Suite
 
-The GoEx suite now runs multiple stateful mutation cases across `L0` to `L4`.
-
-- `current`: existing cache failover hotfix scenario
-- `test1`: update the active outage gate module through GoEx
-- `test3`: create the new replica-promote policy through GoEx
-
 Shell entrypoint:
 
 ```bash
 ./scripts/run_opal_goex_tests.sh --cases "current test1 test3" anthropic haiku
 ```
 
-Harness options:
+Current runner behavior:
 
-- `L0` uses `--execution-mode direct`
-- `L1` to `L4` use `--execution-mode goex`
-- every case resets benchmark state before execution
+- default levels: `L0 L1 L2 L3 L4`
+- default cases: `current test1 test3`
+- `L0` runs `--execution-mode direct`
+- `L1` through `L4` run `--execution-mode goex`
+- each case calls benchmark reset before execution
+- preflight is `GET /healthcheck` on the resolved API URL
+- `OPAL_ADMIN_BASE_URL` or `--admin-base-url` overrides the base URL used to derive API, MCP, and codegen URLs
+- per-job stats rows now include:
+  - `phase1_passed`
+  - `phase2_passed`
+  - `goex_record_ids`
+  - `goex_reversed_ok_count`
 
 ### GoEx System Prompts
 
-Direct baseline prompt for `L0`:
+`L0` direct baseline prompt:
 
 ```text
 You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any nonexistent apply_policy_hotfix endpoint. First call list_policy_modules. If the hotfix module already exists, call update_policy_module; otherwise call create_policy_module. Use module_path and commit_message from the task, and provide rego_content that implements the requested outage policy change.
@@ -351,12 +394,13 @@ Requirements:
 If the module already exists, replace it with the corrected hotfix. End with a short operator-facing summary.
 ```
 
-Verification:
+Verification contract:
 
-- valid GoEx record exists with reversal code
-- module content matches `incident/cache_failover_hotfix.rego`
-- client receives the policy
-- reversal removes it again
+- exactly one GoEx record in GoEx mode
+- hotfix snapshot must resolve to `incident/cache_failover_hotfix.rego`
+- decision on `app/incident/cache_failover_hotfix/allow` must become `true`
+- negative control must remain `false`
+- reversal must clear the hotfix and restore the baseline state
 
 ### GoEx Case: `test1`
 
@@ -380,12 +424,12 @@ Requirements:
 Read the existing tracked policy bundle and adapt the correct production break-glass semantics into the active module. Do not widen access beyond those outage conditions. End with a short operator-facing summary.
 ```
 
-Verification:
+Verification contract:
 
-- exactly one GoEx record
-- positive decision on `app/incident/payments_outage_gate/allow` becomes `true`
-- negative control remains `false`
-- reversal restores the restrictive baseline
+- exactly one GoEx record in GoEx mode
+- decision on `app/incident/payments_outage_gate/allow` must become `true`
+- negative control must remain `false`
+- reversal must restore the restrictive baseline module
 
 ### GoEx Case: `test3`
 
@@ -408,10 +452,38 @@ Requirements:
 No existing module in the live bundle already grants this exact operation, so create a new policy module rather than overwriting an unrelated one. End with a short operator-facing summary.
 ```
 
-Verification:
+Verification contract:
 
-- exactly one GoEx record
-- new module appears
-- positive decision on `app/incident/payments_replica_promote_hotfix/allow` becomes `true`
-- negative control remains `false`
-- reversal removes the module and restores the baseline
+- exactly one GoEx record in GoEx mode
+- decision on `app/incident/payments_replica_promote_hotfix/allow` must become `true`
+- negative control must remain `false`
+- reversal must delete the module and restore the baseline state
+
+## Verifier And Unit-Test Notes
+
+Current focused tests:
+
+```bash
+uv run python -m unittest \
+  tests.test_opal_standard_harness \
+  tests.test_opal_goex_harness \
+  tests.test_opal_verify_run
+```
+
+What those tests cover:
+
+- `tests/test_opal_standard_harness.py`
+  - client policy refresh is triggered before live verification
+  - failure diagnostics include server module state, client policy status, and client health
+- `tests/test_opal_goex_harness.py`
+  - nested GoEx hotfix results are flattened correctly
+  - GoEx record IDs are extracted from export logs and text logs
+  - benchmark non-empty-bundle validation skips code-extension records
+- `tests/test_opal_verify_run.py`
+  - `opal/test2` semantic verification accepts string `actions_taken`
+
+Stats verification details:
+
+- `scripts/opal/opal_verify_run.py` requires a strict fenced JSON final answer with the required top-level key.
+- `opal/test2` is semantically verified instead of requiring a single literal decision/action string.
+- Standard verification is live-state-first plus golden-payload verification, not rigid tool-order enforcement.
