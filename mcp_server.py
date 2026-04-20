@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from opal_server.main import app
 from opal_server.symphony_ext import extension_registry
 from benchmark_helpers import normalize_benchmark_data_update_entry_aliases
@@ -65,11 +66,39 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_csv(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 BENCHMARK_MODE = _env_flag("OPAL_BENCHMARK_MODE", False)
 EXPOSE_ADMIN_TOKEN_TOOL = _env_flag(
     "OPAL_EXPOSE_ADMIN_TOKEN_TOOL",
     default=not BENCHMARK_MODE,
 )
+
+_MCP_DNS_REBINDING_PROTECTION = _env_flag(
+    "OPAL_MCP_DNS_REBINDING_PROTECTION",
+    default=not BENCHMARK_MODE,
+)
+_MCP_ALLOWED_HOSTS = _env_csv("OPAL_MCP_ALLOWED_HOSTS")
+_MCP_ALLOWED_ORIGINS = _env_csv("OPAL_MCP_ALLOWED_ORIGINS")
+
+_mcp_transport_security: TransportSecuritySettings | None = None
+if _MCP_DNS_REBINDING_PROTECTION:
+    _mcp_transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_MCP_ALLOWED_HOSTS or ["127.0.0.1:*", "localhost:*", "[::1]:*"],
+        allowed_origins=_MCP_ALLOWED_ORIGINS
+        or [
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+            "https://127.0.0.1:*",
+            "https://localhost:*",
+            "https://[::1]:*",
+        ],
+    )
 
 # ---------------------------------------------------------------------------
 # Async HTTP client (300s timeout for L2 internal LLM calls)
@@ -336,7 +365,11 @@ if _tool_descriptions.get("code_extension"):
 # FastMCP server & tool definitions (Async)
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("opal-symphony-mcp")
+mcp = FastMCP(
+    "opal-symphony-mcp",
+    host="0.0.0.0",
+    transport_security=_mcp_transport_security,
+)
 
 
 @mcp.tool(

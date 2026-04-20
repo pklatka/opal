@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 
+from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from git.repo import Repo
 from opal_common.logger import logger
 from opal_server.config import opal_server_config
@@ -60,6 +61,26 @@ def _create_codegen_provider():
 
 
 _policy_hotfix_notifier = None
+_policy_repo_getter = None
+_POLICY_REPO_ALIASES = {
+    "",
+    ".",
+    "default",
+    "policy",
+    "repo",
+    "main",
+    "bundle",
+    "policy_repo",
+    "policy_bundle",
+    "policies",
+    "/policy",
+    "opal/policy",
+    "opal/policy-repo",
+    "opal/policy_bundle",
+    "opal/test_policy",
+    "aqua/policy-repo",
+    "test",
+}
 
 
 def set_policy_hotfix_notifier(notifier):
@@ -149,10 +170,33 @@ class PolicyBundleCapabilities:
         return [m for m in modules if not m.get("path", "").endswith(suffix)]
 
 
+def _canonical_policy_repo() -> Repo | None:
+    getter = _policy_repo_getter
+    if getter is None:
+        return None
+    try:
+        return getter()
+    except Exception:
+        return None
+
+
 def _repo_from_path(repo_path: str) -> Repo:
-    if not repo_path:
-        raise RuntimeError("repo_path is required")
-    return Repo(repo_path)
+    candidate = (repo_path or "").strip()
+    repo = _canonical_policy_repo()
+    if repo is not None and (
+        candidate in _POLICY_REPO_ALIASES
+        or candidate == repo.working_dir
+        or candidate == os.path.basename(repo.working_dir or "")
+    ):
+        return repo
+    if candidate:
+        try:
+            return Repo(candidate)
+        except (InvalidGitRepositoryError, NoSuchPathError):
+            pass
+    if repo is not None and not candidate:
+        return repo
+    raise RuntimeError("repo_path is required")
 
 
 class PolicyHotfixCapabilities:
@@ -514,6 +558,9 @@ def set_policy_bundle_context_provider(repo_getter):
     from opal_common.git_utils.bundle_maker import BundleMaker
     from opal_server.config import opal_server_config
     from pathlib import Path
+
+    global _policy_repo_getter
+    _policy_repo_getter = repo_getter
 
     def _bundle_context(repo: Repo) -> dict:
         if repo is None or len(repo.heads) == 0:

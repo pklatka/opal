@@ -7,7 +7,7 @@ Primary sources:
 - Standard runner: [`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh)
 - GoEx runner: [`scripts/run_opal_goex_tests.sh`](../../scripts/run_opal_goex_tests.sh)
 - GoEx harness: [`examples/opal/agent_cli_goex.py`](agent_cli_goex.py)
-- Shared scenario metadata: [`packages/opal-server/opal_server/benchmark_scenarios.py`](packages/opal-server/opal_server/benchmark_scenarios.py)
+- Shared scenario metadata: [`examples/opal/packages/opal-server/opal_server/benchmark_scenarios.py`](packages/opal-server/opal_server/benchmark_scenarios.py)
 - Live verifier: [`scripts/opal/verify_live_state.py`](../../scripts/opal/verify_live_state.py)
 - Stats verifier: [`scripts/opal/opal_verify_run.py`](../../scripts/opal/opal_verify_run.py)
 - Goldens: [`scripts/opal/expected/`](../../scripts/opal/expected/)
@@ -16,7 +16,7 @@ If this file drifts from those files, the code wins.
 
 ## Stack And Env
 
-The benchmark now assumes the Kubernetes-backed OPAL stack started by:
+The benchmark assumes the Kubernetes-backed OPAL stack started by:
 
 ```bash
 ./scripts/start_opal.sh
@@ -25,11 +25,11 @@ source /tmp/symphony-opal-symphony-opal.env
 
 Important runtime assumptions:
 
-- `OPAL_BASE_URL` points at the public OPAL service.
-- `OPAL_ADMIN_BASE_URL` points at the admin service and is preferred by both runners when set.
+- `OPAL_BASE_URL` points at the public OPAL service and is used to derive MCP/codegen URLs unless explicitly overridden.
+- `OPAL_ADMIN_BASE_URL` points at the admin service and is used for benchmark reset/live verification when set.
 - `OPAL_NAMESPACE` is required for live state verification in the standard suite.
 - `OPAL_KUBE_CONTEXT` is optional but used when set.
-- `/symphony/benchmark/info` exposes stack drift/debug metadata and is logged by the runners when available.
+- `/symphony/benchmark/info` exposes stack drift/debug metadata and is logged by the standard runner when available.
 
 ## Reset Contract
 
@@ -62,7 +62,13 @@ allow {
 }
 ```
 
-Reset also publishes the OPAL webhook topic so policy watchers and clients converge to the restored baseline.
+Reset also seeds the benchmark-only noisy policy corpus and benchmark candidate feed:
+
+- policy corpus size reported in suite stats: `80` for `opal/test1` and `opal/test3`
+- benchmark candidate count reported for `opal/test2`: `72`
+- valid candidate ids for `opal/test2`: `cand_02`, `cand_06`, `cand_11`
+
+Reset publishes the OPAL webhook topic so policy watchers and clients converge to the restored baseline.
 
 ## Standard Suite
 
@@ -79,8 +85,10 @@ Current runner behavior:
 - Prompts in this section must stay in sync with the prompt literals in [`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh).
 - Before agent execution, the runner asserts that the task still contains the fenced-JSON grading contract.
 - If `OPAL_NAMESPACE` is set, the runner verifies live baseline state before the job and live final state after the job.
-- The stats verifier enforces strict fenced final JSON and golden payload checks.
-- Tool choreography is diagnostic-only; the standard verifier is no longer tool-order-first.
+- The stats verifier enforces strict fenced final JSON, golden payload checks, and extension-usage requirements for `L1` through `L4`.
+- `L1` through `L3` must trigger at least one extension event.
+- `L4` must show real extension activity through `code_extension`, `server_extension_event_count > 0`, or `extension_triggered_count > 0`.
+- Standard suite rows are enriched with a per-run `suite_run_id`, same-run `delta_*_vs_l0` fields, and suite-level ranking metadata.
 
 Shared system prompt prefix:
 
@@ -100,7 +108,7 @@ Task prompt:
 ```text
 This is a stateful OPAL outage-remediation benchmark. Benchmark auth is already configured.
 
-The production payments outage is still unresolved because the active authorization gate at `incident/payments_outage_gate.rego` blocks the on-call responders from running the recovery action. Inspect the live policy bundle, find the existing production policy whose semantics should govern this outage gate, and update the active module so that the outage is resolved without widening access beyond the intended sev-1 break-glass conditions.
+The production payments outage is still unresolved because the active authorization gate at `incident/payments_outage_gate.rego` blocks the on-call responders from running the recovery action. Inspect the live policy bundle, which now contains several near-match production and non-production break-glass modules. Find the single existing production policy whose semantics should govern this outage gate, and update the active module so that the outage is resolved without widening access beyond the intended sev-1 break-glass conditions.
 
 Requirements:
 - The active module path must remain `incident/payments_outage_gate.rego`.
@@ -112,17 +120,23 @@ Requirements:
   - input.flags.emergency_override == true
   - input.request.operation == "cache_failover"
   - not input.time.within_business_hours
+- The corpus includes several near matches; only one existing production donor is correct.
 - Do not leave the active module overly permissive.
 - Use the tracked OPAL policy repo so clients receive the change.
 
 For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `source_policy_path`, `target_module_path`, `package_name`, and `outage_resolved`.
 ```
 
-Extra system line:
+Base extra system line:
 
 ```text
-This is an outage-policy-application task. Inspect the live bundle, identify the correct existing production break-glass logic, and apply that logic to `incident/payments_outage_gate.rego`.
+This is an outage-policy-application task. Prefer exact-path module reads for the likely incident modules first, and avoid a full-bundle scan unless the near-match corpus makes it necessary.
 ```
+
+Level-specific extension additions:
+
+- `L1` to `L4`: `Benchmark rule: extension levels must use extension-aware policy-bundle inspection to identify the donor policy before mutating the outage gate.`
+- `L4` only: `At L4, do not solve this with raw L0 tool calls alone. Use code_extension or an L4 extension-aware get_policy_bundle call before update_policy_module.`
 
 Live verification contract:
 
@@ -131,7 +145,6 @@ Live verification contract:
 - baseline positive input must be `false`
 - final positive input must be `true`
 - negative control must remain `false`
-- verifier explicitly triggers the client policy refresh path before checking convergence
 
 Positive input:
 
@@ -177,32 +190,38 @@ Task prompt:
 ```text
 This is a stateful OPAL outage-operations benchmark. Benchmark auth is already configured.
 
-An SRE is deciding whether to trigger the emergency cache-failover rollout. First inspect the live control-plane statistics for topics ["policy_data", "incident_access", "feature_flags", "directory_sync", "audit_logs", "compliance_audit"]. Use the normalized `benchmark_stats` view to reason about stable client IDs and topic membership.
+An SRE is deciding whether to trigger the emergency cache-failover rollout. First inspect the live control-plane statistics for topics ["policy_data", "incident_access", "feature_flags", "directory_sync", "audit_logs", "compliance_audit"]. Use the normalized `benchmark_stats` view to compute topic counts from `client_topics`; do not rely on pre-aggregated subscriber lists. Then fetch the benchmark candidate feed for `opal/test2` and select only the production-safe entries that satisfy the rollout.
 
 Decision rule:
 - If `incident_access` has at least 4 subscribers and `feature_flags` has at least 2 subscribers, trigger the emergency rollout now.
 - Otherwise, do not publish any emergency rollout.
 
-If the rollout is triggered, publish the production-safe data update that enables all three outage mitigations below with one-time callback `https://ops.internal/v1/opal/update-report`:
-1. `incident_access` -> `http://opal-benchmark-data:8081/v1/incidents/sev1/access-grants` at `/incident/access`
-2. `directory_sync` -> `http://opal-benchmark-data:8081/v1/directory/emergency/groups` at `/directory/emergency/groups`
-3. `feature_flags` -> `http://opal-benchmark-data:8081/v1/feature-flags/cache-failover` at `/feature_flags/cache_failover`
+If the rollout is triggered:
+- Fetch the candidate entries from the benchmark candidate feed for `opal/test2`.
+- Publish only the valid production-safe subset with one-time callback `https://ops.internal/v1/opal/update-report`.
+- The correct selected candidate ids are hidden among invalid distractors.
 
 Any published entries must remain production-safe:
 - allow only topics `incident_access`, `directory_sync`, and `feature_flags`
 - reject staging hosts
 - reject invalid URLs
+- match the required destination paths
 - set `save_method` to `PUT`
 - preserve the callback
 
-For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `summary` object with keys `decision`, `topic_counts`, `actions_taken`, and `outage_resolved`.
+For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `summary` object with keys `decision`, `topic_counts`, `selected_candidate_ids`, and `outage_resolved`.
 ```
 
-Extra system line:
+Base extra system line:
 
 ```text
-This is a stats-to-action task. Use OPAL statistics to decide whether the emergency rollout should happen, and if it should, publish only the production-safe entries needed to resolve the outage.
+This is a stats-to-action task. Compute topic counts from `benchmark_stats.client_topics`, fetch the benchmark candidate feed, and publish only the selected production-safe entries. For `publish_data_update`, use the accepted entry schema directly: each entry should contain `topics`, `path`, `url`, and `save_method`.
 ```
+
+Level-specific extension additions:
+
+- `L1` to `L4`: `Benchmark rule: extension levels must use extension-aware candidate filtering or extension-aware statistics processing before publishing the rollout.`
+- `L4` only: `At L4, do not solve this with raw L0 tool calls alone. Use code_extension or an L4 extension-aware get_benchmark_data_candidates/get_statistics call before publish_data_update.`
 
 Live verification contract:
 
@@ -228,7 +247,11 @@ Current golden payload:
       "audit_logs": 2,
       "compliance_audit": 0
     },
-    "actions_taken": "published 3 production-safe data update entries with emergency outage mitigations",
+    "selected_candidate_ids": [
+      "cand_02",
+      "cand_06",
+      "cand_11"
+    ],
     "outage_resolved": true
   }
 }
@@ -240,9 +263,9 @@ Additional verifier semantics for `opal/test2`:
   - `trigger_emergency_rollout`
   - `emergency_rollout_triggered`
   - `rollout_triggered`
-- `actions_taken` may be either:
-  - a non-empty string, or
-  - a non-empty list of allowed action tokens
+  - `trigger`
+  - `triggered`
+- `selected_candidate_ids` must be a list matching the expected safe subset.
 
 ### Test 3 — `opal/test3`
 
@@ -251,7 +274,7 @@ Task prompt:
 ```text
 This is a stateful OPAL outage-remediation benchmark. Benchmark auth is already configured.
 
-A new recovery action is needed for the sev-1 payments outage, and no existing production module in the live bundle covers it. Create a new policy module that allows the on-call responders to run the replica promotion action under tightly scoped outage conditions.
+A new recovery action is needed for the sev-1 payments outage. Inspect the live policy bundle, which now contains several near-match replica-promotion and unrelated production modules, and confirm that no existing module exactly satisfies the intended sev-1 break-glass semantics. Then create a new policy module that allows the on-call responders to run the replica promotion action under tightly scoped outage conditions.
 
 Requirements:
 - Create a new module at `incident/payments_replica_promote_hotfix.rego`.
@@ -262,17 +285,23 @@ Requirements:
   - input.actor.class == "oncall_responder"
   - input.flags.emergency_override == true
   - input.request.operation == "promote_replica"
-- No existing module in the live bundle already grants this exact operation, so create a new module instead of overwriting an unrelated one.
+- The bundle contains several near matches, but none satisfies the exact intended semantics.
+- Report the rejected near-match module paths you inspected.
 - Use the tracked OPAL policy repo so clients receive the new policy.
 
-For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `module_path`, `package_name`, `created_new_module`, and `outage_resolved`.
+For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `module_path`, `package_name`, `created_new_module`, `rejected_candidate_paths`, and `outage_resolved`.
 ```
 
-Extra system line:
+Base extra system line:
 
 ```text
-This is a new-policy-creation task. Create a tightly scoped new recovery policy module at `incident/payments_replica_promote_hotfix.rego` and do not overwrite unrelated production modules.
+This is a new-policy-creation task. Audit the noisy policy corpus, confirm that no exact existing replica-promotion module matches the target semantics, then create `incident/payments_replica_promote_hotfix.rego` without overwriting unrelated production modules.
 ```
+
+Level-specific extension additions:
+
+- `L1` to `L4`: `Benchmark rule: extension levels must use extension-aware bundle auditing to identify and report the required near-match modules before creating the new hotfix.`
+- `L4` only: `At L4, do not solve this with raw L0 tool calls alone. Use code_extension or an L4 extension-aware get_policy_bundle call before create_policy_module.`
 
 Live verification contract:
 
@@ -281,7 +310,6 @@ Live verification contract:
 - baseline module is absent
 - final positive input must become `true`
 - negative control must remain `false`
-- verifier explicitly triggers the client policy refresh path before checking convergence
 
 Positive input:
 
@@ -313,10 +341,56 @@ Current golden payload:
     "module_path": "incident/payments_replica_promote_hotfix.rego",
     "package_name": "app.incident.payments_replica_promote_hotfix",
     "created_new_module": true,
+    "rejected_candidate_paths": [
+      "incident/payments_replica_promote_admin.rego",
+      "incident/payments_replica_promote_no_severity.rego",
+      "incident/payments_replica_delete_cluster.rego",
+      "incident/payments_replica_promote_business_hours.rego",
+      "incident/payments_replica_promote_no_override.rego",
+      "incident/break_glass_oncall_promote_replica.rego"
+    ],
     "outage_resolved": true
   }
 }
 ```
+
+Additional verifier semantics for `opal/test3`:
+
+- `rejected_candidate_paths` must be a list.
+- It may contain extra paths, but it must include the six expected near matches above.
+
+### Standard Suite Stats
+
+Per-job rows are written to `stats/opal/opal_<provider>_<model>__server_<provider>_<model>.jsonl` and enriched with:
+
+- `suite_run_id`
+- `passed`
+- `prompt_tokens`, `completion_tokens`, `cost_usd` normalization
+- same-run `delta_total_tokens`, `delta_prompt_tokens`, `delta_completion_tokens`, `delta_latency_ms`, `delta_cost_usd`
+- `total_tokens_delta_vs_l0`, `prompt_tokens_delta_vs_l0`, `completion_tokens_delta_vs_l0`, `latency_ms_delta_vs_l0`, `cost_usd_delta_vs_l0`
+- `benchmark_policy_module_count`
+- `benchmark_candidate_count`
+- `benchmark_selected_candidate_count`
+- `extension_used`
+
+Suite summaries are written to `stats/opal/suite_<provider>_<model>__server_<provider>_<model>.jsonl` and include:
+
+- `suite_run_id`
+- `level`
+- `pass_count`
+- `passing_total_tokens`
+- `passing_latency_ms`
+- `benchmark_policy_module_count`
+- `benchmark_candidate_count`
+- `benchmark_selected_candidate_count`
+- `extension_used_count`
+- `ranking_key`
+
+Current ranking key:
+
+1. `pass_count` descending
+2. `passing_total_tokens` ascending
+3. `passing_latency_ms` ascending
 
 ## GoEx Suite
 
@@ -334,43 +408,44 @@ Current runner behavior:
 - `L1` through `L4` run `--execution-mode goex`
 - each case calls benchmark reset before execution
 - preflight is `GET /healthcheck` on the resolved API URL
-- `OPAL_ADMIN_BASE_URL` or `--admin-base-url` overrides the base URL used to derive API, MCP, and codegen URLs
-- per-job stats rows now include:
+- `OPAL_ADMIN_BASE_URL` or `--admin-base-url` overrides the control-plane API URL for reset/live verification, but MCP and codegen still derive from the public base URL unless explicitly overridden
+- per-job harness stats rows include:
   - `phase1_passed`
   - `phase2_passed`
   - `goex_record_ids`
   - `goex_reversed_ok_count`
+- full token usage for GoEx runs is stored in `logs/opal-goex/.../opal_goex.export.jsonl`, not in the harness `.stats.jsonl` rows
 
 ### GoEx System Prompts
 
 `L0` direct baseline prompt:
 
 ```text
-You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any nonexistent apply_policy_hotfix endpoint. First call list_policy_modules. If the hotfix module already exists, call update_policy_module; otherwise call create_policy_module. Use module_path and commit_message from the task, and provide rego_content that implements the requested outage policy change.
+You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any nonexistent apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether the hotfix module already exists. If it already exists, call update_policy_module; otherwise call create_policy_module. Use module_path and commit_message from the task, and provide rego_content that implements the requested outage policy change.
 ```
 
 `L1` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L1. Do not call apply_policy_hotfix because that endpoint does not exist. Call code_extension exactly once with prompt equal to the task, extension_point='policy_hotfix', execution_mode='goex', explicit Python code, and explicit reversal_code. The code must build the requested Rego source and assign result = upsert_policy_module(context['repo_path'], context['module_path'], rego_source, context['commit_message']). Add any extra fields directly onto that result dict instead of wrapping it under another key such as upsert_result. The reversal_code must delete the module if it was newly created, or restore context['current_rego'] with upsert_policy_module(...) if it already existed.
+You are running an OPAL GoEx test at L1. Do not call apply_policy_hotfix because that endpoint does not exist. Call code_extension exactly once with extension_point='policy_hotfix', execution_mode='goex', explicit Python code, explicit reversal_code, and context_overrides for module_path and commit_message. Use a short execution prompt, not the full task text again. The forward code must return a single flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not wrap the mutation under upsert_result, update_result, upsert_policy_module, or any other nested key. The reversal_code must restore previous_rego with upsert_policy_module(...) when previous_rego is not None, or delete the module with delete_policy_module(..., missing_ok=True) when previous_rego is None, then set result = 'reversed'.
 ```
 
 `L2` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L2. Use the existing code_extension tool, not any benchmark-specific hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. Write a precise prompt telling the server to create or replace the requested hotfix module, return the dict from upsert_policy_module(...) as the final result, add any metadata directly onto that dict instead of nesting it, and generate real reversal logic that restores context['current_rego'] or deletes a newly created module.
+You are running an OPAL GoEx test at L2. Use the existing code_extension tool, not any benchmark-specific hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. Write a precise prompt telling the server to create or replace the requested hotfix module and return one flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not return update_result, upsert_result, upsert_policy_module, new_rego, or old_rego_content wrappers. Generate real reversal logic that restores previous_rego or deletes a newly created module, then sets result = 'reversed'.
 ```
 
 `L3` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L3. Use the existing code_extension tool, not any benchmark-specific hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. Use a detailed prompt that tells the server to use the provided policy bundle and current module context to generate the requested outage policy change and matching reversal logic. The final result should stay flat: return the upsert_policy_module dict directly, with any extra metadata added onto that dict.
+You are running an OPAL GoEx test at L3. Use the existing code_extension tool, not any benchmark-specific hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. Use a detailed prompt that tells the server to use the provided incident policy context and current module state to generate the requested outage policy change and matching reversal logic. The final result must be one flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not nest the mutation under helper-specific keys.
 ```
 
 `L4` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L4. Call code_extension with extension_point='policy_hotfix' and execution_mode='goex'. Ask it to create or replace the requested hotfix module and generate real reversal logic that restores the previous file or deletes the new one. Ask for the final result to stay flat: return the upsert_policy_module dict directly, with any metadata added onto that dict.
+You are running an OPAL GoEx test at L4. Call code_extension with extension_point='policy_hotfix' and execution_mode='goex'. Ask it to create or replace the requested hotfix module and generate real reversal logic that restores previous_rego or deletes the new file. Require the final result to be a flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not return nested helper payloads.
 ```
 
 ### GoEx Case: `current`
@@ -465,6 +540,7 @@ Current focused tests:
 
 ```bash
 uv run python -m unittest \
+  tests.test_opal_benchmark_token_paths \
   tests.test_opal_standard_harness \
   tests.test_opal_goex_harness \
   tests.test_opal_verify_run
@@ -472,6 +548,11 @@ uv run python -m unittest \
 
 What those tests cover:
 
+- `tests/test_opal_benchmark_token_paths.py`
+  - benchmark candidate feed has `72` entries
+  - valid candidate ids remain `cand_02`, `cand_06`, `cand_11`
+  - benchmark policy corpus size remains large enough for the noisy benchmark path
+  - benchmark exact-path policy fast path accepts exact `.rego` reads and rejects incompatible calls
 - `tests/test_opal_standard_harness.py`
   - client policy refresh is triggered before live verification
   - failure diagnostics include server module state, client policy status, and client health
@@ -480,10 +561,14 @@ What those tests cover:
   - GoEx record IDs are extracted from export logs and text logs
   - benchmark non-empty-bundle validation skips code-extension records
 - `tests/test_opal_verify_run.py`
-  - `opal/test2` semantic verification accepts string `actions_taken`
+  - `opal/test2` semantic verification accepts the expected candidate subset
+  - `opal/test3` semantic verification accepts the six required rejected paths
+  - extension-usage enforcement behaves correctly for `L1` through `L4`
 
 Stats verification details:
 
 - `scripts/opal/opal_verify_run.py` requires a strict fenced JSON final answer with the required top-level key.
-- `opal/test2` is semantically verified instead of requiring a single literal decision/action string.
-- Standard verification is live-state-first plus golden-payload verification, not rigid tool-order enforcement.
+- `opal/test2` is semantically verified against `topic_counts`, accepted `decision` variants, and `selected_candidate_ids`.
+- `opal/test3` is semantically verified against the required rejected-path set.
+- `L1` to `L3` fail verification if no extension is triggered.
+- `L4` fails verification if it completes with only raw tool calls and no extension activity.

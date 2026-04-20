@@ -145,7 +145,7 @@ SYMPHONY_CODEGEN_PROVIDER=gemini SYMPHONY_CODEGEN_MODEL=gemini-2.5-flash \
   uv run python -m uvicorn opal_server.main:app --reload --timeout-keep-alive 300
 ```
 
-## Running On Kubernetes (kind / EKS)
+## Running On Kubernetes (kind / EKS / GKE)
 
 The benchmark source of truth is now a real OPAL deployment:
 
@@ -190,12 +190,12 @@ export AWS_REGION=us-east-1
 Run the benchmark against the deployed cluster:
 
 ```bash
-OPAL_BASE_URL=http://127.0.0.1:8000 \
+OPAL_BASE_URL=http://PUBLIC_LB:8080 \
 OPAL_ADMIN_BASE_URL=http://127.0.0.1:8001 \
 OPAL_NAMESPACE=symphony-opal \
 ./scripts/run_opal_tests.sh anthropic haiku
 
-OPAL_BASE_URL=http://127.0.0.1:8000 \
+OPAL_BASE_URL=http://PUBLIC_LB:8080 \
 OPAL_ADMIN_BASE_URL=http://127.0.0.1:8001 \
 OPAL_NAMESPACE=symphony-opal \
 ./scripts/run_opal_goex_tests.sh anthropic haiku
@@ -204,6 +204,14 @@ OPAL_NAMESPACE=symphony-opal \
 `run_opal_tests.sh` now resets benchmark state before each standard-suite job
 via `POST /symphony/benchmark/reset`. Use `--no-reset-state` or
 `OPAL_BENCHMARK_RESET=0` only when you explicitly want to reuse prior state.
+
+Terraform-based cloud deployments for both EKS and GKE now live under:
+
+```bash
+scripts/opal/terraform/
+```
+
+See [`scripts/opal/terraform/README.md`](../../scripts/opal/terraform/README.md) from the repo root for the full AWS and GCP flow, public URLs, admin port-forwarding, and benchmark env exports.
 
 ## Legacy Single-Process Mode
 

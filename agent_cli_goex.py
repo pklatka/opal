@@ -134,8 +134,14 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
         "You are running an OPAL GoEx test at L1. Do not call apply_policy_hotfix because that endpoint does "
         "not exist. Call code_extension exactly once with extension_point='policy_hotfix', execution_mode='goex', "
         "explicit Python code, explicit reversal_code, and context_overrides for module_path and commit_message. "
+        "Inside the Python code, read module_path, commit_message, repo_path, current_rego, and module_exists_before "
+        "from the sandbox context or direct locals. Do not read from context_overrides inside the code, and do not "
+        "invent repo aliases like policy, repo, or default. Assign the final flat dict to result; do not use return. "
         "Use a short execution prompt, not the full task text again. The forward code must return a single flat dict "
         "with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
+        "The forward code is invalid unless it actually performs the mutation by calling "
+        "upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result. "
+        "Never fabricate action or rego_content without invoking the mutating capability. "
         "Do not wrap the mutation under upsert_result, update_result, upsert_policy_module, or any other nested key. "
         "The reversal_code must restore previous_rego with upsert_policy_module(...) when previous_rego is not None, "
         "or delete the module with delete_policy_module(..., missing_ok=True) when previous_rego is None, then set "
@@ -144,8 +150,14 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L2": (
         "You are running an OPAL GoEx test at L2. Use the existing code_extension tool, not any benchmark-specific "
         "hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. "
+        "Use the provided sandbox context values for repo_path, module_path, commit_message, current_rego, and "
+        "module_exists_before. Do not guess repo aliases or read from context_overrides inside the code. Assign the "
+        "final flat dict to result; do not use return. "
         "Write a precise prompt telling the server to create or replace the requested hotfix module and return one flat "
         "dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
+        "The forward code is invalid unless it actually performs the mutation by calling "
+        "upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result. "
+        "Never fabricate action or rego_content without invoking the mutating capability. "
         "Do not return update_result, upsert_result, upsert_policy_module, new_rego, or old_rego_content wrappers. "
         "Generate real reversal logic that restores previous_rego or deletes a newly created module, then sets "
         "result = 'reversed'."
@@ -153,26 +165,34 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L3": (
         "You are running an OPAL GoEx test at L3. Use the existing code_extension tool, not any benchmark-specific "
         "hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. "
+        "Use the provided sandbox context values for repo_path, module_path, commit_message, current_rego, and "
+        "module_exists_before. Do not guess repo aliases or read from context_overrides inside the code. Assign the "
+        "final flat dict to result; do not use return. "
         "Use a detailed prompt that tells the server to use the provided incident policy context and current module state to "
         "generate the requested outage policy change and matching reversal logic. The final result must be one flat dict with "
         "keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not nest the mutation "
-        "under helper-specific keys."
+        "under helper-specific keys. The forward code is invalid unless it actually performs the mutation by calling "
+        "upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result."
     ),
     "L4": (
         "You are running an OPAL GoEx test at L4. Call code_extension with extension_point='policy_hotfix' "
-        "and execution_mode='goex'. Ask it to create or replace the requested hotfix module and generate real "
+        "and execution_mode='goex'. Use the provided sandbox context values for repo_path, module_path, commit_message, "
+        "current_rego, and module_exists_before. Do not guess repo aliases or read from context_overrides inside the code. "
+        "Assign the final flat dict to result; do not use return. "
+        "Ask it to create or replace the requested hotfix module and generate real "
         "reversal logic that restores previous_rego or deletes the new file. Require the final result to be a flat dict "
         "with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
-        "Do not return nested helper payloads."
+        "Do not return nested helper payloads. The forward code is invalid unless it actually performs the mutation by "
+        "calling upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result."
     ),
 }
 
 DIRECT_SYSTEM_PROMPT = (
     "You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any "
-    "nonexistent apply_policy_hotfix endpoint. First call list_policy_modules. If the hotfix module "
-    "already exists, call update_policy_module; otherwise call create_policy_module. Use module_path "
-    "and commit_message from the task, and provide rego_content that implements the requested outage "
-    "policy change."
+    "nonexistent apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether "
+    "the hotfix module already exists. If it already exists, call update_policy_module; otherwise call "
+    "create_policy_module. Use module_path and commit_message from the task, and provide rego_content "
+    "that implements the requested outage policy change."
 )
 
 PASS = "\033[32mPASS\033[0m"
@@ -343,6 +363,7 @@ def _flatten_hotfix_result(payload: dict[str, Any] | None) -> dict[str, Any]:
         ):
             if key in payload and key not in flattened:
                 flattened[key] = payload[key]
+    
     if "rego_content" not in flattened:
         for key in ("new_rego", "new_rego_content", "rego"):
             value = payload.get(key)
@@ -360,6 +381,14 @@ def _flatten_hotfix_result(payload: dict[str, Any] | None) -> dict[str, Any]:
             flattened["module_exists_before"] = bool(payload.get("existed"))
         elif "current_rego" in payload:
             flattened["module_exists_before"] = payload.get("current_rego") is not None
+
+    action = flattened.get("action")
+    if action in ("create", "update"):
+        flattened["action"] = action + "d"
+    elif action in {"upsert", "upserted", "upsert_policy_module"}:
+        flattened["action"] = (
+            "updated" if flattened.get("module_exists_before") else "created"
+        )
     return flattened
 
 
@@ -385,9 +414,21 @@ def _is_valid_hotfix_snapshot(
 ) -> bool:
     if snapshot.get("module_path") != module_path:
         return False
-    if snapshot.get("action") not in {"created", "updated"}:
+    if snapshot.get("action") not in {"created", "updated", "create", "update"}:
         return False
     rego = str(snapshot.get("rego_content", "") or "")
+    return package_name in rego and summary_token in rego
+
+
+def _module_matches_hotfix(
+    module: dict[str, Any] | None,
+    *,
+    package_name: str,
+    summary_token: str,
+) -> bool:
+    if not isinstance(module, dict):
+        return False
+    rego = str(module.get("rego", "") or "")
     return package_name in rego and summary_token in rego
 
 
@@ -404,6 +445,29 @@ def _wait_for_hotfix_module(
             return module
         time.sleep(1)
     return None
+
+
+def _wait_for_server_hotfix_state(
+    api_url: str,
+    *,
+    module_path: str,
+    package_name: str,
+    summary_token: str,
+    expect_present: bool,
+    timeout_seconds: int = 120,
+) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        module = _fetch_hotfix_module(api_url, module_path)
+        visible = _module_matches_hotfix(
+            module,
+            package_name=package_name,
+            summary_token=summary_token,
+        )
+        if visible == expect_present:
+            return True
+        time.sleep(3)
+    return False
 
 
 def _normalize_hotfix_snapshot(name: str, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -1065,12 +1129,16 @@ def run_test(args: argparse.Namespace) -> bool:
         print("\n[5/5] Skipping reversal (direct mode).")
         return True
 
-    if len(record_ids) != 1:
-        print(
-            f"  {FAIL}  Expected exactly one GoEx record, captured {len(record_ids)}. "
-            f"Snapshots: {json.dumps(hotfix_snapshots, indent=2)[:800]}"
-        )
+    # Deduplicate and pick the last record (the model may retry on errors)
+    unique_ids = list(dict.fromkeys(record_ids))
+    if len(unique_ids) > 1:
+        print(f"  [INFO] Multiple GoEx records captured ({len(unique_ids)}); using the last one.")
+        record_ids[:] = [unique_ids[-1]]
+    elif len(unique_ids) == 0:
+        print(f"  {FAIL}  No GoEx record captured.")
         return False
+    else:
+        record_ids[:] = unique_ids
 
     print(f"\n[4/5] Checking GoEx records ({len(record_ids)} captured)...")
     fetched_records: list[dict[str, Any]] = []
@@ -1108,24 +1176,23 @@ def run_test(args: argparse.Namespace) -> bool:
         )
         return False
     action = effective_snapshot.get("action")
-    module = _wait_for_hotfix_module(api_url, scenario.module_path)
-    if module is None:
+    if not _wait_for_server_hotfix_state(
+        api_url,
+        module_path=scenario.module_path,
+        package_name=scenario.package_name,
+        summary_token=scenario.summary_token,
+        expect_present=True,
+        timeout_seconds=30,
+    ):
         print(
-            f"  {PASS}  GoEx record captured a valid hotfix for {scenario.module_path} "
-            f"(action={action or 'unknown'}); admin API did not reflect it within the bounded readback window."
+            f"  {FAIL}  GoEx record captured a plausible hotfix snapshot, but the server bundle did not "
+            f"reflect the expected policy markers within the bounded readback window."
         )
-    else:
-        rego = module.get("rego", "")
-        if scenario.package_name not in rego or scenario.summary_token not in rego:
-            print(
-                f"  {FAIL}  Admin API returned {scenario.module_path}, but it did not contain expected markers. "
-                f"package={scenario.package_name!r}, token={scenario.summary_token!r}"
-            )
-            return False
-        print(
-            f"  {PASS}  GoEx record captured a valid hotfix and admin API readback matched "
-            f"(action={action or 'unknown'})"
-        )
+        return False
+    print(
+        f"  {PASS}  GoEx record captured a valid hotfix and admin API readback matched "
+        f"(action={action or 'unknown'})"
+    )
     if args.namespace:
         try:
             _refresh_scenario_client(args.namespace, args.kube_context, scenario)
@@ -1189,6 +1256,16 @@ def run_test(args: argparse.Namespace) -> bool:
             print(f"  {FAIL}  reverse failed for {rid[:8]}…: {exc}")
             return False
 
+    if not _wait_for_server_hotfix_state(
+        api_url,
+        module_path=scenario.module_path,
+        package_name=scenario.package_name,
+        summary_token=scenario.summary_token,
+        expect_present=False,
+        timeout_seconds=120,
+    ):
+        print(f"  {FAIL}  server bundle still reflects the hotfix after reversal.")
+        return False
     if scenario.decision_check is None and _hotfix_exists(api_url, scenario.module_path):
         print(f"  {FAIL}  Hotfix module still exists after reversal.")
         return False

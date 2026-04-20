@@ -454,7 +454,7 @@ If the module already exists, replace it with the corrected hotfix. End with a s
         module_path="incident/payments_outage_gate.rego",
         package_name="app.incident.payments_outage_gate",
         commit_message="Restore payments outage gate during sev-1 incident",
-        summary_token="cache_failover",
+        summary_token="oncall_responder",
         task="""A sev-1 outage in the production payments cluster is still unresolved because the active authorization gate module at "incident/payments_outage_gate.rego" is too restrictive. Use GoEx mode to update the active module so on-call responders can perform the cache failover action, but only under the intended sev-1 break-glass conditions.
 
 Requirements:

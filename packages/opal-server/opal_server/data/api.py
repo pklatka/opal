@@ -12,6 +12,7 @@ from opal_common.authentication.verifier import Unauthorized
 from opal_common.logger import logger
 from opal_common.schemas.data import (
     DataSourceConfig,
+    DataSourceEntry,
     DataUpdate,
     DataUpdateReport,
     ServerDataSourceConfig,
@@ -65,6 +66,24 @@ def _default_publish_data_update(update: DataUpdate) -> list[dict]:
         e.dict() if hasattr(e, "dict") else e.model_dump()
         for e in update.entries
     ]
+
+
+def _normalize_extension_entry_aliases(item: dict) -> dict:
+    """Coerce common extension output aliases back into DataSourceEntry shape."""
+    normalized = dict(item)
+    if "topics" not in normalized and isinstance(normalized.get("topic"), str):
+        normalized["topics"] = [normalized["topic"]]
+    if "dst_path" not in normalized and isinstance(normalized.get("path"), str):
+        normalized["dst_path"] = normalized["path"]
+    if "url" not in normalized and isinstance(normalized.get("source"), str):
+        normalized["url"] = normalized.pop("source")
+    data_source = normalized.pop("data_source", None)
+    if isinstance(data_source, dict):
+        if "url" not in normalized and isinstance(data_source.get("url"), str):
+            normalized["url"] = data_source["url"]
+        if "save_method" not in normalized and isinstance(data_source.get("save_method"), str):
+            normalized["save_method"] = data_source["save_method"]
+    return normalized
 
 
 def _callback_urls(update: DataUpdate) -> list[str]:
@@ -274,10 +293,15 @@ def init_data_updates_router(
 
         # If extension triggered, rebuild update with filtered/modified entries
         if ext.triggered and isinstance(outcome.results, list):
-            from opal_common.schemas.data import DataSourceEntry as DSE
             try:
                 new_entries = [
-                    DSE(**{k: v for k, v in e.items() if v is not None})
+                    DataSourceEntry(
+                        **{
+                            k: v
+                            for k, v in _normalize_extension_entry_aliases(e).items()
+                            if v is not None
+                        }
+                    )
                     if isinstance(e, dict) else e
                     for e in outcome.results
                 ]
