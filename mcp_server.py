@@ -35,6 +35,7 @@ API_URL = os.getenv("OPAL_API_URL") or os.getenv("API_URL", "http://127.0.0.1:80
 CLIENT_TOKEN = os.getenv("OPAL_CLIENT_TOKEN") or os.getenv("CLIENT_TOKEN")
 DATASOURCE_TOKEN = os.getenv("OPAL_DATA_SOURCE_TOKEN") or os.getenv("DATA_SOURCE_TOKEN")
 MASTER_TOKEN = os.getenv("OPAL_AUTH_MASTER_TOKEN") or os.getenv("MASTER_TOKEN")
+GOEX_GATE_ENV = "SYMPHONY_MCP_ALLOW_GOEX"
 
 _BENCHMARK_KNOWN_TOPICS = [
     "policy_data",
@@ -139,6 +140,22 @@ def _datasource_headers() -> dict[str, str]:
 
 def _master_headers() -> dict[str, str]:
     return _bearer(MASTER_TOKEN)
+
+
+def _resolve_execution_mode(requested: str | None) -> str:
+    """Allow GoEx by default; set SYMPHONY_MCP_ALLOW_GOEX=false to force direct."""
+    normalized = (requested or "direct").strip().lower()
+    if normalized != "goex":
+        return "direct"
+    gate_value = os.getenv(GOEX_GATE_ENV)
+    if gate_value is None or gate_value.strip().lower() in {"1", "true", "yes", "on"}:
+        return "goex"
+    logger.warning(
+        "Downgrading execution_mode=goex to direct because %s=%r",
+        GOEX_GATE_ENV,
+        gate_value,
+    )
+    return "direct"
 
 
 def _normalize_data_update_entries(entries: Any) -> list[dict[str, Any]]:
@@ -393,7 +410,7 @@ async def get_policy_bundle(
         query["path"] = path
     if base_hash is not None:
         query["base_hash"] = base_hash
-    body: dict[str, Any] = {"extension_level": extension_level, "execution_mode": execution_mode}
+    body: dict[str, Any] = {"extension_level": extension_level, "execution_mode": _resolve_execution_mode(execution_mode)}
     if extension_code is not None:
         body["extension_code"] = extension_code
     if task_description is not None:
@@ -435,7 +452,7 @@ async def publish_data_update(
         "entries": parsed_entries,
         "reason": reason,
         "extension_level": extension_level,
-        "execution_mode": execution_mode,
+        "execution_mode": _resolve_execution_mode(execution_mode),
     }
     if update_id is not None:
         body["id"] = update_id
@@ -495,7 +512,7 @@ async def get_benchmark_data_candidates(
     execution_mode: str = "direct",
     reversal_code: str | None = None,
 ) -> str:
-    body: dict[str, Any] = {"extension_level": extension_level, "execution_mode": execution_mode}
+    body: dict[str, Any] = {"extension_level": extension_level, "execution_mode": _resolve_execution_mode(execution_mode)}
     if extension_code is not None:
         body["extension_code"] = extension_code
     if task_description is not None:
@@ -529,7 +546,7 @@ async def get_statistics(
     execution_mode: str = "direct",
     reversal_code: str | None = None,
 ) -> str:
-    body: dict[str, Any] = {"extension_level": extension_level, "execution_mode": execution_mode}
+    body: dict[str, Any] = {"extension_level": extension_level, "execution_mode": _resolve_execution_mode(execution_mode)}
     if extension_code is not None:
         body["extension_code"] = extension_code
     if task_description is not None:
@@ -647,7 +664,7 @@ async def code_extension(
     reversal_code: str | None = None,
     context_overrides: dict[str, Any] | None = None,
 ) -> str:
-    body: dict[str, Any] = {"prompt": prompt, "execution_mode": execution_mode}
+    body: dict[str, Any] = {"prompt": prompt, "execution_mode": _resolve_execution_mode(execution_mode)}
     if extension_point is not None:
         body["extension_point"] = extension_point
     if code is not None:

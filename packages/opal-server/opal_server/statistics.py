@@ -475,45 +475,34 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
         name="get_statistics",
         method="GET",
         path="/statistics",
-        levels=["L0", "L1", "L2", "L3", "L4"],
+        levels=["L0", "L1", "L2", "L3"],
         level_params={
             "L0": [],
             "L1": ["extension_level", "extension_code", "execution_mode", "reversal_code"],
             "L2": ["extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
             "L3": ["extension_level", "task_description", "execution_mode", "reversal_code"],
-            "L4": ["extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
         },
         level_overrides={
             "L0": {
                 "description": (
-                    "Get OPAL server statistics: connected clients, their "
-                    "subscribed topics, server replicas, and uptime."
+                    "Get OPAL server statistics: connected clients, subscribed topics, server replicas, and uptime. "
+                    "Benchmark agents should compute topic counts from client topic membership."
                 ),
             },
             "L1": {
                 "description": (
-                    "Get server statistics with extension support. Raw stats "
-                    "are collected first, then extension_code runs to compute "
-                    "aggregates, detect anomalies, or generate alerts."
+                    "Same as L0 plus extension_code and reversal_code. Extension code receives raw stats "
+                    "and may return aggregate fields such as topic counts without mutating state."
                 ),
             },
             "L2": {
                 "description": (
-                    "Get server statistics with dynamic extension. The system "
-                    "auto-generates extension code for advanced analytics."
+                    "Same as L1 plus task_description for server-side statistics aggregation codegen."
                 ),
             },
             "L3": {
                 "description": (
-                    "Get server statistics with source-aware extension. The system "
-                    "reads the endpoint source code and generates targeted extension "
-                    "code that supplements the standard statistics logic."
-                ),
-            },
-            "L4": {
-                "description": (
-                    "Get server statistics with freeform extension support while "
-                    "preserving the normal /statistics request and response shape."
+                    "Same as L2, but source-aware: task_description drives codegen using endpoint source and live stats context."
                 ),
             },
         },

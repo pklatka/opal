@@ -202,7 +202,10 @@ def _repo_from_path(repo_path: str) -> Repo:
 class PolicyHotfixCapabilities:
     """Capabilities for emergency policy hotfix mutations."""
 
-    @capability(name="read_policy_module")
+    @capability(
+        name="read_policy_module",
+        description="Purpose: read one Rego module from the tracked policy clone. Inputs: repo_path alias/path and module_path. Returns source text or None.",
+    )
     def read_policy_module(self, repo_path: str, module_path: str) -> str | None:
         """Read a Rego module from the tracked policy clone."""
         try:
@@ -210,7 +213,10 @@ class PolicyHotfixCapabilities:
         except (PolicyModulePathError, ValueError, FileNotFoundError) as exc:
             raise RuntimeError(str(exc)) from exc
 
-    @capability(name="module_exists")
+    @capability(
+        name="module_exists",
+        description="Purpose: check whether a tracked Rego module exists before create/update/delete decisions. Inputs: repo_path and module_path. Returns bool.",
+    )
     def module_exists(self, repo_path: str, module_path: str) -> bool:
         """Check whether a module exists in the tracked policy clone."""
         try:
@@ -218,7 +224,11 @@ class PolicyHotfixCapabilities:
         except (PolicyModulePathError, ValueError) as exc:
             raise RuntimeError(str(exc)) from exc
 
-    @capability(name="upsert_policy_module", mutates=True)
+    @capability(
+        name="upsert_policy_module",
+        mutates=True,
+        description="Purpose: create or replace a Rego module and commit it. Inputs: repo_path, module_path, rego_content, commit_message. Returns action, module_path, hashes, and content metadata.",
+    )
     def upsert_policy_module(
         self,
         repo_path: str,
@@ -239,7 +249,11 @@ class PolicyHotfixCapabilities:
         except (PolicyModulePathError, ValueError, FileNotFoundError) as exc:
             raise RuntimeError(str(exc)) from exc
 
-    @capability(name="delete_policy_module", mutates=True)
+    @capability(
+        name="delete_policy_module",
+        mutates=True,
+        description="Purpose: delete a Rego module and commit the removal. Inputs: repo_path, module_path, commit_message, missing_ok. Returns deletion metadata.",
+    )
     def delete_policy_module(
         self,
         repo_path: str,
@@ -264,12 +278,12 @@ class PolicyHotfixCapabilities:
 class DataUpdateCapabilities:
     """Capabilities for working with data update entries in extension code."""
 
-    @capability(name="filter_entries_by_topic")
+    @capability(name="filter_entries_by_topic", description="Purpose: keep data-update entries containing a topic. Inputs: entries and topic. Returns filtered entries.")
     def filter_entries_by_topic(self, entries: list[dict], topic: str) -> list[dict]:
         """Filter data source entries that belong to a specific topic."""
         return [e for e in entries if topic in e.get("topics", [])]
 
-    @capability(name="exclude_entries_by_topic")
+    @capability(name="exclude_entries_by_topic", description="Purpose: drop data-update entries containing a topic. Inputs: entries and topic. Returns filtered entries.")
     def exclude_entries_by_topic(self, entries: list[dict], topic: str) -> list[dict]:
         """Exclude data source entries that belong to a specific topic."""
         return [e for e in entries if topic not in e.get("topics", [])]
@@ -299,7 +313,7 @@ class DataUpdateCapabilities:
         """Filter entries whose dst_path starts with the given prefix."""
         return [e for e in entries if e.get("dst_path", "").startswith(path_prefix)]
 
-    @capability(name="validate_entry_urls")
+    @capability(name="validate_entry_urls", description="Purpose: keep entries whose url starts with http:// or https://. Inputs: entries. Returns valid entries.")
     def validate_entry_urls(self, entries: list[dict]) -> list[dict]:
         """Return entries that have a non-empty url starting with http:// or https://."""
         return [
@@ -307,7 +321,7 @@ class DataUpdateCapabilities:
             if e.get("url", "").startswith(("http://", "https://"))
         ]
 
-    @capability(name="set_entry_save_method", mutates=True)
+    @capability(name="set_entry_save_method", mutates=True, description="Purpose: set save_method on every entry before publication. Inputs: entries and save_method. Returns modified entries.")
     def set_entry_save_method(self, entries: list[dict], save_method: str) -> list[dict]:
         """Set the save_method field on all entries (PUT or PATCH).
 
@@ -440,12 +454,11 @@ post_policy_bundle = extension_registry.register(
     ExtensionPoint(
         name="post_policy_bundle",
         description=(
-            "Post-processing hook for policy bundles. Extension code can "
-            "filter, transform, or augment the policy bundle before it is "
-            "served to clients. Useful for excluding test policies from "
-            "production bundles, injecting environment-specific data, "
-            "filtering by package or directory, or implementing custom "
-            "bundle construction logic."
+            "Policy bundle extension: context contains policy_modules/modules, data_modules, manifest, hash, "
+            "module_count, and data_module_count from the tracked Git repo. Typical benchmark flow: use exact-path "
+            "or incident-module filtering, inspect package names and Rego source, reject near matches, and return "
+            "the selected module dicts or an audit summary. Read-only; mutating policy changes belong in the "
+            "policy_hotfix/code_extension path."
         ),
         trigger_description=(
             "Runs when extension_level is L1+ and extension code is provided "
@@ -460,10 +473,11 @@ policy_hotfix = extension_registry.register(
     ExtensionPoint(
         name="policy_hotfix",
         description=(
-            "Mutating hook for emergency policy hotfixes. Extension code can "
-            "inspect the tracked Git clone, generate or revise a single Rego "
-            "module, and commit the resulting change as a guarded control-plane "
-            "operation."
+            "Policy hotfix extension: context contains repo_path, module_path, commit_message, incident policy modules, "
+            "module_index, current_rego, and module_exists_before when available. Typical flow: read_policy_module or "
+            "module_exists -> build the exact Rego source -> upsert_policy_module or delete_policy_module. Mutating "
+            "capabilities create GoEx records when execution_mode is goex; return module_path, package_name/action, "
+            "rego_content, previous_rego, module_exists_before, and repo_path so reversal can undo exactly the change."
         ),
         trigger_description=(
             "Runs when code_extension targets the policy_hotfix extension point "
@@ -478,11 +492,9 @@ post_data_update = extension_registry.register(
     ExtensionPoint(
         name="post_data_update",
         description=(
-            "Post-processing hook for data update events. Extension code can "
-            "validate, filter, deduplicate, or transform data source entries "
-            "before they are published to clients. Useful for conditional "
-            "publishing, entry validation, topic-based filtering, or "
-            "implementing custom publication logic."
+            "Data update extension: context contains entries, reason, and entry_count before publication. "
+            "Typical benchmark flow: filter entries by allowed topics and destination paths, validate URLs, "
+            "deduplicate, set save_method, and return only production-safe entries while preserving callback handling."
         ),
         trigger_description=(
             "Runs when extension_level is L1+ and extension code is provided "
@@ -497,9 +509,9 @@ post_benchmark_candidate_feed = extension_registry.register(
     ExtensionPoint(
         name="post_benchmark_candidate_feed",
         description=(
-            "Post-processing hook for benchmark candidate feeds. Extension code can "
-            "validate, filter, deduplicate, or transform candidate entries before "
-            "they are returned to benchmark clients."
+            "Benchmark candidate feed extension: context contains label, candidates, and candidate_count. "
+            "Typical benchmark flow: select only valid production-safe candidate ids from noisy distractors, "
+            "reject staging hosts, invalid URLs, wrong topics, wrong paths, and wrong save_method values."
         ),
         trigger_description=(
             "Runs when extension_level is L1+ and extension code is provided "
@@ -514,11 +526,9 @@ post_statistics = extension_registry.register(
     ExtensionPoint(
         name="post_statistics",
         description=(
-            "Post-processing hook for server statistics. Extension code can "
-            "compute aggregates, detect anomalies, generate alerts, or "
-            "reformat statistics before they are returned. Useful for "
-            "monitoring, alerting on disconnected clients, or building "
-            "custom dashboards."
+            "Statistics extension: context contains live OPAL stats. Typical benchmark flow: derive topic counts "
+            "from each client's visible topics, ignore internal policy channels, and return a compact aggregate. "
+            "Read-only; do not publish data or mutate policies from this hook."
         ),
         trigger_description=(
             "Runs when extension_level is L1+ and extension code is provided "

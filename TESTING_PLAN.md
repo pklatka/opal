@@ -416,36 +416,59 @@ Current runner behavior:
   - `goex_reversed_ok_count`
 - full token usage for GoEx runs is stored in `logs/opal-goex/.../opal_goex.export.jsonl`, not in the harness `.stats.jsonl` rows
 
+### GoEx Model Flow
+
+This is the model-facing flow for each `L1` through `L4` OPAL GoEx case.
+
+1. The harness resets OPAL to the benchmark baseline and sends the selected system prompt plus one case task prompt to the model.
+2. The model may use read-only OPAL/MCP tools to inspect existing modules or bundles for context.
+3. The actual reversible policy mutation is expected to go through the OPAL `code_extension` hotfix path in GoEx mode, not through direct policy CRUD or bundle post-processing.
+4. Inside that hotfix extension, the model should use the extension point's published capability metadata to decide which policy-hotfix helpers are available and how to call them.
+5. The forward GoEx execution leaves the requested policy change applied and records an execution result with enough metadata for validation and reversal. The grader looks for `module_path`, `package_name`, `action`, `rego_content`, `previous_rego`, `module_exists_before`, and `repo_path` when available.
+6. The model's final assistant message is separate from the GoEx execution result. It must end with exactly one fenced JSON block containing a top-level `result` object for the benchmark grader.
+7. After the final answer, the harness verifies the live authorization decision, runs the GoEx reversal, and verifies that the baseline state was restored.
+
+To see what the model actually did in a run:
+
+- Per-case transcript: `logs/opal-goex/<model>/<case>/<level>/opal_goex.log`
+- Combined transcript: `logs/opal-goex/<model>/opal_goex.log`
+- Raw exported run stats: `logs/opal-goex/<model>/<case>/<level>/opal_goex.export.jsonl`
+- Suite result rows: `stats/opal/goex/suite_<provider>_<model>.jsonl`
+
+In the transcript, look for `[Tool]` blocks to see each tool call, `[Sandbox Code]` blocks to see extension code, `[GoEx Mode]` blocks to see recorded GoEx IDs, and `[Reversal Code]` blocks to see reversal logic. The harness also prints the final verification and reversal outcome near the end of each case log.
+
 ### GoEx System Prompts
+
+For each GoEx job, the model receives one system prompt from this section plus one task prompt from the selected GoEx case below. The final fenced JSON contract lives in the task prompt, while the GoEx execution-result contract is described in both the system prompt and the task prompt.
 
 `L0` direct baseline prompt:
 
 ```text
-You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any nonexistent apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether the hotfix module already exists. If it already exists, call update_policy_module; otherwise call create_policy_module. Use module_path and commit_message from the task, and provide rego_content that implements the requested outage policy change.
+You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any nonexistent apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether the hotfix module already exists. If it already exists, call update_policy_module; otherwise call create_policy_module. Use module_path and commit_message from the task, and provide rego_content that implements the requested outage policy change. Follow the task's grading contract exactly and end with exactly one fenced JSON block containing the requested top-level result object.
 ```
 
 `L1` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L1. Do not call apply_policy_hotfix because that endpoint does not exist. Call code_extension exactly once with extension_point='policy_hotfix', execution_mode='goex', explicit Python code, explicit reversal_code, and context_overrides for module_path and commit_message. Use a short execution prompt, not the full task text again. The forward code must return a single flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not wrap the mutation under upsert_result, update_result, upsert_policy_module, or any other nested key. The reversal_code must restore previous_rego with upsert_policy_module(...) when previous_rego is not None, or delete the module with delete_policy_module(..., missing_ok=True) when previous_rego is None, then set result = 'reversed'.
+You are running an OPAL GoEx round-trip test at L1. For each required mutation, use GoEx-enabled extension execution at this level with valid forward execution logic and valid reversal logic. Do not rely on direct baseline execution. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather than a read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary MCP/request tools are not available inside that extension code. Use the extension capability metadata to choose the appropriate helper calls. The forward path should apply exactly the requested mutation, leave it applied, and return structured identifiers and hotfix metadata for the created object, including the final Rego source as `rego_content`. The reversal path should read the execution result, undo exactly what was created, and report its outcome.
 ```
 
 `L2` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L2. Use the existing code_extension tool, not any benchmark-specific hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. Write a precise prompt telling the server to create or replace the requested hotfix module and return one flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not return update_result, upsert_result, upsert_policy_module, new_rego, or old_rego_content wrappers. Generate real reversal logic that restores previous_rego or deletes a newly created module, then sets result = 'reversed'.
+You are running an OPAL GoEx round-trip test at L2. For each required mutation, use GoEx-enabled execution at this level and request extension behavior with reversal support. Do not rely on direct baseline execution. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather than a read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary MCP/request tools are not available inside that extension code. Use the extension capability metadata to choose the appropriate helper calls. Apply exactly the requested mutation once per target object, return structured identifiers for created objects, and ensure the reversal path can undo them from the execution result. Include the final Rego source as `rego_content` in that result.
 ```
 
 `L3` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L3. Use the existing code_extension tool, not any benchmark-specific hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. Use a detailed prompt that tells the server to use the provided incident policy context and current module state to generate the requested outage policy change and matching reversal logic. The final result must be one flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not nest the mutation under helper-specific keys.
+You are running an OPAL GoEx round-trip test at L3. For each required mutation, use GoEx-enabled extension execution at this level with source-aware reversible behavior. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather than a read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary MCP/request tools are not available inside that extension code. Use the extension capability metadata to choose the appropriate helper calls. Apply exactly one mutation per requested target object. Do not perform exploratory, duplicate, or debugging mutations. Return structured identifiers for what was created so reversal can undo exactly those changes from the execution result, including the final Rego source as `rego_content`.
 ```
 
 `L4` system prompt:
 
 ```text
-You are running an OPAL GoEx test at L4. Call code_extension with extension_point='policy_hotfix' and execution_mode='goex'. Ask it to create or replace the requested hotfix module and generate real reversal logic that restores previous_rego or deletes the new file. Require the final result to be a flat dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not return nested helper payloads.
+You are running an OPAL GoEx round-trip test at L4. Use GoEx-enabled reversible extension execution at this level. The forward path should perform only the requested mutations, leave them applied, and assign the final structured payload to the expected result variable. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather than a read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary MCP/request tools are not available inside that extension code. Use the extension capability metadata to choose the appropriate helper calls. Do not perform exploratory or debugging mutations. The reversal path must undo every created object using identifiers from the execution result. Ensure execution results expose stable identifiers for all created objects, including the final Rego source as `rego_content`.
 ```
 
 ### GoEx Case: `current`
@@ -454,6 +477,10 @@ Task prompt:
 
 ```text
 A sev-1 outage in the production payments cluster forced traffic onto a stale cache replica. Apply an emergency OPAL policy hotfix so the on-call responders can run the cache failover operation while the incident is active. Use GoEx mode for safety and auditability.
+
+Apply the change through OPAL's reversible `code_extension` hotfix path so the forward mutation remains applied first and GoEx reversal can undo it later. If you inspect modules or bundles for context, keep those steps read-only; the reversible GoEx mutation itself should go through that hotfix path, not through bundle post-processing or direct policy CRUD for the actual change.
+
+In the hotfix extension code, use the policy-hotfix capabilities exposed for that extension point; ordinary OPAL request/MCP tools are outside that sandbox. Use the extension capability metadata to choose the appropriate helper calls. The GoEx execution result should include the hotfix metadata needed for grading and reversal: `module_path`, `package_name`, `action`, `rego_content`, `previous_rego`, `module_exists_before`, and `repo_path` when available. This execution result is separate from the final fenced JSON answer.
 
 Requirements:
 - Use module_path "incident/cache_failover_hotfix.rego".
@@ -466,7 +493,9 @@ Requirements:
   - input.flags.emergency_override == true
   - input.request.operation == "cache_failover"
 
-If the module already exists, replace it with the corrected hotfix. End with a short operator-facing summary.
+If the module already exists, replace it with the corrected hotfix.
+
+For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `module_path`, `package_name`, `action`, and `outage_resolved`. Set `module_path` to `incident/cache_failover_hotfix.rego`, `package_name` to `app.incident.cache_failover_hotfix`, `action` to either `created` or `updated`, and `outage_resolved` to `true`.
 ```
 
 Verification contract:
@@ -484,6 +513,10 @@ Task prompt:
 ```text
 A sev-1 outage in the production payments cluster is still unresolved because the active authorization gate module at "incident/payments_outage_gate.rego" is too restrictive. Use GoEx mode to update the active module so on-call responders can perform the cache failover action, but only under the intended sev-1 break-glass conditions.
 
+Apply the change through OPAL's reversible `code_extension` hotfix path so the forward mutation remains applied first and GoEx reversal can undo it later. If you inspect modules or bundles for context, keep those steps read-only; the reversible GoEx mutation itself should go through that hotfix path, not through bundle post-processing or direct policy CRUD for the actual change.
+
+In the hotfix extension code, use the policy-hotfix capabilities exposed for that extension point; ordinary OPAL request/MCP tools are outside that sandbox. Use the extension capability metadata to choose the appropriate helper calls. The GoEx execution result should include the hotfix metadata needed for grading and reversal: `module_path`, `package_name`, `action`, `rego_content`, `previous_rego`, `module_exists_before`, and `repo_path` when available. This execution result is separate from the final fenced JSON answer.
+
 Requirements:
 - Use module_path "incident/payments_outage_gate.rego".
 - Use commit_message "Restore payments outage gate during sev-1 incident".
@@ -496,7 +529,9 @@ Requirements:
   - input.request.operation == "cache_failover"
   - not input.time.within_business_hours
 
-Read the existing tracked policy bundle and adapt the correct production break-glass semantics into the active module. Do not widen access beyond those outage conditions. End with a short operator-facing summary.
+Read the existing tracked policy bundle and adapt the correct production break-glass semantics into the active module. Do not widen access beyond those outage conditions.
+
+For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `module_path`, `package_name`, `action`, and `outage_resolved`. Set `module_path` to `incident/payments_outage_gate.rego`, `package_name` to `app.incident.payments_outage_gate`, `action` to `updated`, and `outage_resolved` to `true`.
 ```
 
 Verification contract:
@@ -513,6 +548,10 @@ Task prompt:
 ```text
 A sev-1 outage in the production payments cluster now requires a recovery action that no existing production policy covers: allowing on-call responders to run the replica promotion operation. Use GoEx mode to create a new emergency OPAL policy hotfix.
 
+Apply the change through OPAL's reversible `code_extension` hotfix path so the forward mutation remains applied first and GoEx reversal can undo it later. If you inspect modules or bundles for context, keep those steps read-only; the reversible GoEx mutation itself should go through that hotfix path, not through bundle post-processing or direct policy CRUD for the actual change.
+
+In the hotfix extension code, use the policy-hotfix capabilities exposed for that extension point; ordinary OPAL request/MCP tools are outside that sandbox. Use the extension capability metadata to choose the appropriate helper calls. The GoEx execution result should include the hotfix metadata needed for grading and reversal: `module_path`, `package_name`, `action`, `rego_content`, `previous_rego`, `module_exists_before`, and `repo_path` when available. This execution result is separate from the final fenced JSON answer.
+
 Requirements:
 - Use module_path "incident/payments_replica_promote_hotfix.rego".
 - Use commit_message "Create payments replica promote hotfix".
@@ -524,7 +563,9 @@ Requirements:
   - input.flags.emergency_override == true
   - input.request.operation == "promote_replica"
 
-No existing module in the live bundle already grants this exact operation, so create a new policy module rather than overwriting an unrelated one. End with a short operator-facing summary.
+No existing module in the live bundle already grants this exact operation, so create a new policy module rather than overwriting an unrelated one.
+
+For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `module_path`, `package_name`, `action`, and `outage_resolved`. Set `module_path` to `incident/payments_replica_promote_hotfix.rego`, `package_name` to `app.incident.payments_replica_promote_hotfix`, `action` to `created`, and `outage_resolved` to `true`.
 ```
 
 Verification contract:

@@ -131,59 +131,53 @@ HOTFIX_MODULE_PATH = DEFAULT_SCENARIO.module_path
 
 GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L1": (
-        "You are running an OPAL GoEx test at L1. Do not call apply_policy_hotfix because that endpoint does "
-        "not exist. Call code_extension exactly once with extension_point='policy_hotfix', execution_mode='goex', "
-        "explicit Python code, explicit reversal_code, and context_overrides for module_path and commit_message. "
-        "Inside the Python code, read module_path, commit_message, repo_path, current_rego, and module_exists_before "
-        "from the sandbox context or direct locals. Do not read from context_overrides inside the code, and do not "
-        "invent repo aliases like policy, repo, or default. Assign the final flat dict to result; do not use return. "
-        "Use a short execution prompt, not the full task text again. The forward code must return a single flat dict "
-        "with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
-        "The forward code is invalid unless it actually performs the mutation by calling "
-        "upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result. "
-        "Never fabricate action or rego_content without invoking the mutating capability. "
-        "Do not wrap the mutation under upsert_result, update_result, upsert_policy_module, or any other nested key. "
-        "The reversal_code must restore previous_rego with upsert_policy_module(...) when previous_rego is not None, "
-        "or delete the module with delete_policy_module(..., missing_ok=True) when previous_rego is None, then set "
-        "result = 'reversed'."
+        "You are running an OPAL GoEx round-trip test at L1. "
+        "For each required mutation, use GoEx-enabled extension execution at this level with valid forward execution "
+        "logic and valid reversal logic. Do not rely on direct baseline execution. In OPAL, the reversible mutation "
+        "should use the `code_extension` hotfix path rather than a read-only inspection step, a bundle "
+        "post-processing extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on "
+        "the policy-hotfix capabilities exposed for that extension point; ordinary MCP/request tools are not "
+        "available inside that extension code. Use the extension capability metadata to choose the appropriate "
+        "helper calls. "
+        "The forward path should apply exactly the requested mutation, leave it applied, and return structured "
+        "identifiers and hotfix metadata for the created object, including the final Rego source as `rego_content`. "
+        "The reversal path should read the execution result, undo exactly what was created, and report its outcome."
     ),
     "L2": (
-        "You are running an OPAL GoEx test at L2. Use the existing code_extension tool, not any benchmark-specific "
-        "hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. "
-        "Use the provided sandbox context values for repo_path, module_path, commit_message, current_rego, and "
-        "module_exists_before. Do not guess repo aliases or read from context_overrides inside the code. Assign the "
-        "final flat dict to result; do not use return. "
-        "Write a precise prompt telling the server to create or replace the requested hotfix module and return one flat "
-        "dict with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
-        "The forward code is invalid unless it actually performs the mutation by calling "
-        "upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result. "
-        "Never fabricate action or rego_content without invoking the mutating capability. "
-        "Do not return update_result, upsert_result, upsert_policy_module, new_rego, or old_rego_content wrappers. "
-        "Generate real reversal logic that restores previous_rego or deletes a newly created module, then sets "
-        "result = 'reversed'."
+        "You are running an OPAL GoEx round-trip test at L2. "
+        "For each required mutation, use GoEx-enabled execution at this level and request extension behavior "
+        "with reversal support. Do not rely on direct baseline execution. In OPAL, the reversible mutation should "
+        "use the `code_extension` hotfix path rather than a read-only inspection step, a bundle post-processing "
+        "extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on the policy-hotfix "
+        "capabilities exposed for that extension point; ordinary MCP/request tools are not available inside that "
+        "extension code. Use the extension capability metadata to choose the appropriate helper calls. Apply exactly the requested mutation "
+        "once per target object, return structured identifiers for created objects, and ensure the reversal path "
+        "can undo them from the execution result. Include the final Rego source as `rego_content` in that result."
     ),
     "L3": (
-        "You are running an OPAL GoEx test at L3. Use the existing code_extension tool, not any benchmark-specific "
-        "hotfix endpoint. Call code_extension exactly once with extension_point='policy_hotfix' and execution_mode='goex'. "
-        "Use the provided sandbox context values for repo_path, module_path, commit_message, current_rego, and "
-        "module_exists_before. Do not guess repo aliases or read from context_overrides inside the code. Assign the "
-        "final flat dict to result; do not use return. "
-        "Use a detailed prompt that tells the server to use the provided incident policy context and current module state to "
-        "generate the requested outage policy change and matching reversal logic. The final result must be one flat dict with "
-        "keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. Do not nest the mutation "
-        "under helper-specific keys. The forward code is invalid unless it actually performs the mutation by calling "
-        "upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result."
+        "You are running an OPAL GoEx round-trip test at L3. "
+        "For each required mutation, use GoEx-enabled extension execution at this level with source-aware reversible "
+        "behavior. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather than a "
+        "read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code "
+        "for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary "
+        "MCP/request tools are not available inside that extension code. Use the extension capability metadata to "
+        "choose the appropriate helper calls. Apply exactly "
+        "one mutation per requested target object. Do not perform exploratory, duplicate, or debugging mutations. "
+        "Return structured identifiers for what was created so reversal can undo exactly those changes from the "
+        "execution result, including the final Rego source as `rego_content`."
     ),
     "L4": (
-        "You are running an OPAL GoEx test at L4. Call code_extension with extension_point='policy_hotfix' "
-        "and execution_mode='goex'. Use the provided sandbox context values for repo_path, module_path, commit_message, "
-        "current_rego, and module_exists_before. Do not guess repo aliases or read from context_overrides inside the code. "
-        "Assign the final flat dict to result; do not use return. "
-        "Ask it to create or replace the requested hotfix module and generate real "
-        "reversal logic that restores previous_rego or deletes the new file. Require the final result to be a flat dict "
-        "with keys action, module_path, rego_content, previous_rego, module_exists_before, and repo_path. "
-        "Do not return nested helper payloads. The forward code is invalid unless it actually performs the mutation by "
-        "calling upsert_policy_module(repo_path, module_path, rego_content, commit_message) exactly once before assigning result."
+        "You are running an OPAL GoEx round-trip test at L4. "
+        "Use GoEx-enabled reversible extension execution at this level. The forward path should perform only the "
+        "requested mutations, leave them applied, and assign the final structured payload to the expected "
+        "result variable. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather "
+        "than a read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code "
+        "for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary "
+        "MCP/request tools are not available inside that extension code. Use the extension capability metadata to "
+        "choose the appropriate helper calls. Do "
+        "not perform exploratory or debugging mutations. The reversal path must undo every created object using "
+        "identifiers from the execution result. Ensure execution results expose stable identifiers for all created "
+        "objects, including the final Rego source as `rego_content`."
     ),
 }
 
@@ -192,7 +186,8 @@ DIRECT_SYSTEM_PROMPT = (
     "nonexistent apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether "
     "the hotfix module already exists. If it already exists, call update_policy_module; otherwise call "
     "create_policy_module. Use module_path and commit_message from the task, and provide rego_content "
-    "that implements the requested outage policy change."
+    "that implements the requested outage policy change. Follow the task's grading contract exactly and "
+    "end with exactly one fenced JSON block containing the requested top-level result object."
 )
 
 PASS = "\033[32mPASS\033[0m"
@@ -933,18 +928,21 @@ def run_test(args: argparse.Namespace) -> bool:
             )
         )
 
-    try:
-        reset = _reset_benchmark_state(api_url)
-    except Exception as exc:
-        print(f"  {FAIL}  could not reset benchmark state: {exc}")
-        return False
-    print(f"  {PASS}  benchmark reset ok: {json.dumps(reset, ensure_ascii=True)}")
-    if args.namespace:
+    if not args.skip_reset:
         try:
-            _refresh_scenario_client(args.namespace, args.kube_context, scenario)
+            reset = _reset_benchmark_state(api_url)
         except Exception as exc:
-            print(f"  {FAIL}  benchmark reset client refresh failed: {exc}")
+            print(f"  {FAIL}  could not reset benchmark state: {exc}")
             return False
+        print(f"  {PASS}  benchmark reset ok: {json.dumps(reset, ensure_ascii=True)}")
+        if args.namespace:
+            try:
+                _refresh_scenario_client(args.namespace, args.kube_context, scenario)
+            except Exception as exc:
+                print(f"  {FAIL}  benchmark reset client refresh failed: {exc}")
+                return False
+    else:
+        print("  [INFO] benchmark reset skipped by caller")
 
     print(
         f"\n[2/5] Running agent (case={args.case}, level={args.level}, execution_mode={args.execution_mode})..."
@@ -1366,6 +1364,7 @@ def main() -> None:
     parser.add_argument("--benchmark-final-json-key", metavar="KEY", default=None)
     parser.add_argument("--namespace", default=os.getenv("OPAL_NAMESPACE"))
     parser.add_argument("--kube-context", default=os.getenv("OPAL_KUBE_CONTEXT"))
+    parser.add_argument("--skip-reset", action="store_true")
     args = parser.parse_args()
 
     ok = run_test(args)

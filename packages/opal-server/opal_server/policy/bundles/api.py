@@ -201,48 +201,36 @@ def _default_get_policy(repo: Repo, input_paths: List[Path], base_hash: Optional
     name="get_policy_bundle",
     method="GET",
     path="/policy",
-    levels=["L0", "L1", "L2", "L3", "L4"],
+    levels=["L0", "L1", "L2", "L3"],
     level_params={
         "L0": ["path", "base_hash"],
         "L1": ["path", "base_hash", "extension_level", "extension_code", "execution_mode", "reversal_code"],
         "L2": ["path", "base_hash", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
         "L3": ["path", "base_hash", "extension_level", "task_description", "execution_mode", "reversal_code"],
-        "L4": ["path", "base_hash", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
     },
     level_overrides={
         "L0": {
             "description": (
-                "Fetch policy bundle from the tracked Git repository. "
-                "Returns Rego policy modules, data modules, and a manifest. "
-                "Supports differential bundles via base_hash parameter."
+                "Fetch policy bundle from the tracked Git repository. Inputs: optional path and base_hash. "
+                "Returns policy_modules, data_modules, manifest, and hash. Use exact path reads first for benchmark tasks."
             ),
         },
         "L1": {
             "description": (
-                "Fetch policy bundle with extension support. The bundle is built "
-                "from Git, then extension_code runs as post-processing to filter, "
-                "transform, or augment the bundle (e.g. exclude test policies, "
-                "filter by environment)."
+                "Same as L0 plus extension_code and reversal_code. Extension code receives the built bundle context "
+                "and should return filtered or audited policy module dicts without mutating the repo."
             ),
         },
         "L2": {
             "description": (
-                "Fetch policy bundle with dynamic extension. The bundle is built "
-                "from Git, then the system auto-generates extension code for "
-                "advanced bundle processing."
+                "Same as L1 plus task_description for server-side codegen over the live bundle context. "
+                "Use for targeted policy selection, near-match filtering, and corpus audit work."
             ),
         },
         "L3": {
             "description": (
-                "Fetch policy bundle with source-aware extension. The system "
-                "reads the endpoint source code and generates targeted extension "
-                "code that supplements the standard bundle building logic."
-            ),
-        },
-        "L4": {
-            "description": (
-                "Fetch policy bundle with freeform extension support while "
-                "preserving the normal /policy request and response shape."
+                "Same as L2, but source-aware: task_description drives codegen using endpoint source and bundle context. "
+                "Mutating policy changes belong in policy_hotfix/code_extension, not this read-only bundle hook."
             ),
         },
     },

@@ -187,45 +187,36 @@ def init_data_updates_router(
         name="publish_data_update",
         method="POST",
         path=opal_server_config.DATA_CONFIG_ROUTE,
-        levels=["L0", "L1", "L2", "L3", "L4"],
+        levels=["L0", "L1", "L2", "L3"],
         level_params={
             "L0": ["entries", "reason", "id", "callback"],
             "L1": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "execution_mode", "reversal_code"],
             "L2": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
             "L3": ["entries", "reason", "id", "callback", "extension_level", "task_description", "execution_mode", "reversal_code"],
-            "L4": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
         },
         level_overrides={
             "L0": {
                 "description": (
-                    "Publish a data update to OPAL clients. Each entry specifies a URL "
-                    "to fetch data from, a destination path in OPA, and target topics."
+                    "Publish a data update to OPAL clients. Inputs: entries, reason, id, callback. "
+                    "Each entry carries topics, url, dst_path/path, and save_method; response includes status and callback_urls."
                 ),
             },
             "L1": {
                 "description": (
-                    "Publish a data update with extension support. Entries are processed "
-                    "first, then extension_code runs to validate, filter, deduplicate, "
-                    "or transform entries before publishing."
+                    "Same as L0 plus extension_code and reversal_code. Extension code receives candidate entries "
+                    "before publish and should validate, filter, deduplicate, or transform them."
                 ),
             },
             "L2": {
                 "description": (
-                    "Publish a data update with dynamic extension. The system auto-generates "
-                    "extension code for advanced entry processing before publishing."
+                    "Same as L1 plus task_description for server-side codegen before publish. "
+                    "Use for production-safe candidate filtering while preserving callback and save_method requirements."
                 ),
             },
             "L3": {
                 "description": (
-                    "Publish a data update with source-aware extension. The system reads "
-                    "the endpoint source code and generates targeted extension code that "
-                    "supplements the standard publish logic."
-                ),
-            },
-            "L4": {
-                "description": (
-                    "Publish a data update with freeform extension support while "
-                    "preserving the normal /data/config request and response shape."
+                    "Same as L2, but source-aware: task_description drives codegen using endpoint source and entry context. "
+                    "Return only entries that should be published."
                 ),
             },
         },

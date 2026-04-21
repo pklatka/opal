@@ -40,6 +40,7 @@ def create_app():
 
 def main() -> None:
     os.environ.setdefault("SYMPHONY_CODEGEN_PROVIDER", "websocket")
+    os.environ.setdefault("SYMPHONY_SANDBOX_TIMEOUT", "180")
     uvicorn.run(
         "serve_prod:create_app",
         factory=True,

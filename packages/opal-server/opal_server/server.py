@@ -452,13 +452,35 @@ class OpalServer:
             name="get_benchmark_data_candidates",
             method="GET",
             path="/symphony/benchmark/data-candidates",
-            levels=["L0", "L1", "L2", "L3", "L4"],
+            levels=["L0", "L1", "L2", "L3"],
             level_params={
                 "L0": ["label"],
                 "L1": ["label", "extension_level", "extension_code", "execution_mode", "reversal_code"],
                 "L2": ["label", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
                 "L3": ["label", "extension_level", "task_description", "execution_mode", "reversal_code"],
-                "L4": ["label", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+            },
+            level_overrides={
+                "L0": {
+                    "description": (
+                        "Fetch benchmark candidate data-update entries. Inputs: label. "
+                        "Returns ok, label, candidate_count, and candidates with candidate_id, topics, dst_path, url, save_method, and reason."
+                    )
+                },
+                "L1": {
+                    "description": (
+                        "Same as L0 plus extension_code and reversal_code. Extension code may filter or transform the candidate list before return."
+                    )
+                },
+                "L2": {
+                    "description": (
+                        "Same as L1 plus task_description for server-side codegen over the candidate feed."
+                    )
+                },
+                "L3": {
+                    "description": (
+                        "Same as L2, but source-aware: task_description drives codegen using endpoint source and candidate context."
+                    )
+                },
             },
         )
         @app.get(
