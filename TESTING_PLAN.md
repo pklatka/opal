@@ -99,6 +99,7 @@ You are running the OPAL benchmark.
 - Do not ask for credentials, tokens, or elevated permissions.
 - Do not provide incident-management advice, rollout recommendations, or extra narrative.
 - Use the OPAL benchmark tools and return only the requested fenced JSON.
+- When using code_extension, perform all data fetching, logic, and mutations in a single, comprehensive extension script instead of making multiple tool calls.
 ```
 
 ### Test 1 — `opal/test1`
@@ -200,6 +201,7 @@ Decision rule:
 If the rollout is triggered:
 - Fetch the candidate entries from the benchmark candidate feed for `opal/test2`.
 - Publish only the valid production-safe subset with one-time callback `https://ops.internal/v1/opal/update-report`.
+- CRITICAL: You MUST explicitly pass the callback parameter to the publisher; do not rely on it being inferred.
 - The correct selected candidate ids are hidden among invalid distractors.
 
 Any published entries must remain production-safe:
@@ -210,7 +212,7 @@ Any published entries must remain production-safe:
 - set `save_method` to `PUT`
 - preserve the callback
 
-For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `summary` object with keys `decision`, `topic_counts`, `selected_candidate_ids`, and `outage_resolved`.
+For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `summary` object with strictly typed values: `decision` ("rollout_triggered" or "rollout_rejected"), `topic_counts`, `selected_candidate_ids`, and `outage_resolved`.
 ```
 
 Base extra system line:
@@ -288,7 +290,7 @@ Requirements:
   - input.flags.emergency_override == true
   - input.request.operation == "promote_replica"
 - The bundle contains several near matches, but none satisfies the exact intended semantics.
-- Report the rejected near-match module paths you inspected.
+- Report the rejected near-match module paths you inspected. For rejected_candidate_paths, only include exactly the files you inspected and specifically rejected as non-matches based on their functional conditions, not loose string matching or all files in the directory.
 - Use the tracked OPAL policy repo so clients receive the new policy.
 
 For automated grading, end your reply with exactly one Markdown fenced JSON block (```json ... ```), with no prose or extra text before or after the fence. The JSON must contain a top-level `result` object with keys `module_path`, `package_name`, `created_new_module`, `rejected_candidate_paths`, and `outage_resolved`.

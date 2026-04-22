@@ -179,7 +179,8 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
         "for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary "
         "MCP/request tools are not available inside that extension code. Use the extension capability metadata to "
         "choose the appropriate helper calls. Do "
-        "not perform exploratory or debugging mutations. The reversal path must undo every created object using "
+        "not perform exploratory or debugging mutations. Consolidate your operations into a single code_extension "
+        "execution rather than making multiple multi-turn extension calls. The reversal path must undo every created object using "
         "identifiers from the execution result. Ensure execution results expose stable identifiers for all created "
         "objects, including the final Rego source as `rego_content`."
     ),

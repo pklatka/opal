@@ -319,6 +319,7 @@ def init_data_updates_router(
             response["extension_triggered"] = True
             response["generated_code"] = ext.generated_code or extension_code
             response["endpoint_source"] = ext.endpoint_source
+            response["extension_results"] = outcome.results
             response["entries_published"] = len(update.entries)
         if ext.goex_record_id:
             response["goex_record_id"] = ext.goex_record_id

@@ -137,7 +137,16 @@ def _run_coro_sync(coro):
     """Run an async OPAL operation from sandbox worker threads."""
     loop = _data_update_loop_getter() if _data_update_loop_getter is not None else None
     if loop is not None and loop.is_running():
-        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30)
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+
+        def _log_publish_error(done):
+            try:
+                done.result()
+            except Exception:
+                logger.warning("Scheduled OPAL async operation failed", exc_info=True)
+
+        future.add_done_callback(_log_publish_error)
+        return None
     return asyncio.run(coro)
 
 
