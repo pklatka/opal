@@ -779,8 +779,9 @@ policy_hotfix = extension_registry.register(
             "rego_content, previous_rego, module_exists_before, and repo_path so reversal can undo exactly the change."
         ),
         trigger_description=(
-            "Runs when apply_policy_hotfix (L1-L3) or code_extension (L4) "
-            "targets the policy_hotfix context and executes code against the tracked policy repository"
+            "Runs from the existing create_policy_module/update_policy_module endpoints "
+            "(L1-L3) or code_extension (L4) when policy_hotfix code executes "
+            "against the tracked policy repository"
         ),
         capabilities=list(_policy_hotfix_capabilities),
         codegen_provider=_create_codegen_provider(),

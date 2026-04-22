@@ -135,10 +135,11 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
         "You are running an OPAL GoEx round-trip test at L1. "
         "For each required mutation, use GoEx-enabled extension execution at this level with valid forward execution "
         "logic and valid reversal logic. Do not rely on direct baseline execution. In OPAL, the reversible mutation "
-        "should use the predefined `apply_policy_hotfix` extension hook rather than a read-only inspection step, a bundle "
-        "post-processing extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on "
-        "the policy-hotfix capabilities exposed for that extension point; ordinary MCP/request tools are not "
-        "available inside that extension code. Use the extension capability metadata to choose the appropriate "
+        "should use the existing `create_policy_module` or `update_policy_module` endpoint with `extension_level=\"L1\"`, extension_code, and goex "
+        "parameters rather than a read-only inspection step, a bundle post-processing extension, or a separate "
+        "hotfix endpoint. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed "
+        "for that endpoint; ordinary MCP/request tools are not available inside that extension code. Use the "
+        "extension capability metadata to choose the appropriate "
         "helper calls. "
         "The forward path should apply exactly the requested mutation, leave it applied, and return structured "
         "identifiers and hotfix metadata for the created object, including the final Rego source as `rego_content`. "
@@ -148,9 +149,10 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
         "You are running an OPAL GoEx round-trip test at L2. "
         "For each required mutation, use GoEx-enabled execution at this level and request extension behavior "
         "with reversal support. Do not rely on direct baseline execution. In OPAL, the reversible mutation should "
-        "use the predefined `apply_policy_hotfix` extension hook rather than a read-only inspection step, a bundle post-processing "
-        "extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on the policy-hotfix "
-        "capabilities exposed for that extension point; ordinary MCP/request tools are not available inside that "
+        "use the existing `create_policy_module` or `update_policy_module` endpoint with `extension_level=\"L2\"`, task_description, and goex "
+        "parameters rather than a read-only inspection step, a bundle post-processing extension, or a separate "
+        "hotfix endpoint. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed "
+        "for that endpoint; ordinary MCP/request tools are not available inside that "
         "extension code. Use the extension capability metadata to choose the appropriate helper calls. Apply exactly the requested mutation "
         "once per target object, return structured identifiers for created objects, and ensure the reversal path "
         "can undo them from the execution result. Include the final Rego source as `rego_content` in that result."
@@ -158,9 +160,10 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L3": (
         "You are running an OPAL GoEx round-trip test at L3. "
         "For each required mutation, use GoEx-enabled extension execution at this level with source-aware reversible "
-        "behavior. In OPAL, the reversible mutation should use the source-aware `apply_policy_hotfix` extension hook rather than a "
-        "read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code "
-        "for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary "
+        "behavior. In OPAL, the reversible mutation should use the source-aware existing "
+        "`create_policy_module` or `update_policy_module` endpoint with `extension_level=\"L3\"`, task_description, and goex parameters rather than a "
+        "read-only inspection step, a bundle post-processing extension, or a separate hotfix endpoint. Extension code "
+        "for this hotfix should rely on the policy-hotfix capabilities exposed for that endpoint; ordinary "
         "MCP/request tools are not available inside that extension code. Use the extension capability metadata to "
         "choose the appropriate helper calls. Apply exactly "
         "one mutation per requested target object. Do not perform exploratory, duplicate, or debugging mutations. "
@@ -184,7 +187,7 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
 
 DIRECT_SYSTEM_PROMPT = (
     "You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any "
-    "apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether "
+    "extension/goex variant of the policy module endpoints. Use list_policy_modules if needed to determine whether "
     "the hotfix module already exists. If it already exists, call update_policy_module; otherwise call "
     "create_policy_module. Use module_path and commit_message from the task, and provide rego_content "
     "that implements the requested outage policy change. Follow the task's grading contract exactly and "
@@ -554,9 +557,9 @@ def _wait_for_server_hotfix_state(
 
 
 def _normalize_hotfix_snapshot(name: str, data: dict[str, Any]) -> dict[str, Any] | None:
-    if name in {"create_policy_module", "update_policy_module"}:
+    if name in {"create_policy_module", "update_policy_module"} and "results" not in data:
         return data
-    if name not in {"code_extension", "apply_policy_hotfix"}:
+    if name not in {"code_extension", "create_policy_module", "update_policy_module"}:
         return None
     snapshot: dict[str, Any] = {}
     results = data.get("results")

@@ -46,43 +46,13 @@ class PolicyModuleCreate(BaseModel):
     commit_message: str = Field(
         "Create policy module", description="Git commit message"
     )
-
-
-class PolicyModuleUpdate(BaseModel):
-    module_path: str = Field(
-        ..., description="Repo-relative path of the module to update"
-    )
-    rego_content: str = Field(..., description="New Rego source code")
-    commit_message: str = Field(
-        "Update policy module", description="Git commit message"
-    )
-
-
-class PolicyModuleDelete(BaseModel):
-    module_path: str = Field(
-        ..., description="Repo-relative path of the module to delete"
-    )
-    commit_message: str = Field(
-        "Delete policy module", description="Git commit message"
-    )
-
-
-class PolicyHotfixRequest(BaseModel):
-    module_path: str = Field(
-        ...,
-        description="Repo-relative hotfix module path.",
-    )
-    commit_message: str = Field(
-        "Apply policy hotfix",
-        description="Git commit message for the hotfix mutation.",
-    )
     package_name: str | None = Field(
         None,
-        description="Expected package name for the hotfix module, if known.",
+        description="Expected package name for extension/goex hotfix result metadata.",
     )
     extension_level: str = Field(
-        "L1",
-        description="Symphony extension level for this predefined hotfix hook (L1-L3).",
+        "L0",
+        description="Symphony extension level for this existing policy-module endpoint.",
     )
     extension_code: str | None = Field(
         None,
@@ -99,6 +69,25 @@ class PolicyHotfixRequest(BaseModel):
     reversal_code: str | None = Field(
         None,
         description="Undo code for GoEx mode.",
+    )
+
+
+class PolicyModuleUpdate(PolicyModuleCreate):
+    module_path: str = Field(
+        ..., description="Repo-relative path of the module to update"
+    )
+    rego_content: str = Field(..., description="New Rego source code")
+    commit_message: str = Field(
+        "Update policy module", description="Git commit message"
+    )
+
+
+class PolicyModuleDelete(BaseModel):
+    module_path: str = Field(
+        ..., description="Repo-relative path of the module to delete"
+    )
+    commit_message: str = Field(
+        "Delete policy module", description="Git commit message"
     )
 
 
@@ -125,17 +114,25 @@ def _to_http_exception(exc: Exception) -> HTTPException:
     )
 
 
-def _default_apply_policy_hotfix(body: PolicyHotfixRequest) -> dict:
-    """Default hotfix hook source for L3 code-aware generation.
+def _extract_package_name(rego_content: str) -> str | None:
+    for raw_line in rego_content.splitlines():
+        line = raw_line.strip()
+        if line.startswith("package "):
+            return line.split(None, 1)[1].strip()
+    return None
 
-    The predefined hotfix endpoint exists to host extension code. Its baseline
-    path intentionally does not mutate the policy repository.
-    """
-    return {
-        "status": "requires_extension",
-        "module_path": body.module_path,
-        "commit_message": body.commit_message,
-    }
+
+def _policy_extension_level(body: PolicyModuleCreate) -> str:
+    level = (body.extension_level or "L0").strip().upper()
+    return level if level in {"L0", "L1", "L2", "L3", "L4"} else "L0"
+
+
+def _policy_extension_requested(body: PolicyModuleCreate) -> bool:
+    return bool(body.extension_code) or bool(body.task_description)
+
+
+def _policy_execution_mode(body: PolicyModuleCreate) -> str:
+    return "goex" if (body.execution_mode or "direct").strip().lower() == "goex" else "direct"
 
 
 def init_policy_crud_router(pubsub_endpoint=None):
@@ -163,88 +160,23 @@ def init_policy_crud_router(pubsub_endpoint=None):
                 "Failed to publish policy change notification", exc_info=True
             )
 
-    @tool(
-        name="apply_policy_hotfix",
-        method="POST",
-        path="/policy/hotfix",
-        levels=["L1", "L2", "L3"],
-        level_params={
-            "L1": [
-                "module_path",
-                "commit_message",
-                "package_name",
-                "extension_level",
-                "extension_code",
-                "execution_mode",
-                "reversal_code",
-            ],
-            "L2": [
-                "module_path",
-                "commit_message",
-                "package_name",
-                "extension_level",
-                "extension_code",
-                "task_description",
-                "execution_mode",
-                "reversal_code",
-            ],
-            "L3": [
-                "module_path",
-                "commit_message",
-                "package_name",
-                "extension_level",
-                "task_description",
-                "execution_mode",
-                "reversal_code",
-            ],
-        },
-        level_overrides={
-            "L1": {
-                "description": (
-                    "Predefined policy-hotfix extension hook. Provide extension_code that uses policy-hotfix "
-                    "capabilities such as read_policy_module, module_exists, upsert_policy_module, and "
-                    "delete_policy_module. Use execution_mode='goex' with reversal_code for reversible mutations."
-                ),
-            },
-            "L2": {
-                "description": (
-                    "Predefined policy-hotfix extension hook with server-side codegen. Provide task_description "
-                    "describing the policy module to create or update; include reversal_code when using GoEx."
-                ),
-            },
-            "L3": {
-                "description": (
-                    "Source-aware policy-hotfix extension hook. Provide task_description; the code generator sees "
-                    "this endpoint source and policy-hotfix capabilities."
-                ),
-            },
-        },
-    )
-    @router.post("/policy/hotfix")
-    async def apply_policy_hotfix(
-        body: PolicyHotfixRequest = Body(...),
-        repo: Repo = Depends(get_repo),
-    ):
-        """Run a predefined policy-hotfix extension hook for L1-L3."""
-        if body.extension_level == "L4":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="L4 policy hotfixes must use /symphony/code_extension",
-            )
-        if body.extension_level not in {"L1", "L2", "L3"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="apply_policy_hotfix supports L1-L3 only",
-            )
-
+    async def _run_policy_module_extension(
+        *,
+        body: PolicyModuleCreate,
+        repo: Repo,
+        endpoint_path: str,
+        default_source,
+    ) -> JSONResponse:
         provider = policy_hotfix.context_provider
         context = provider() if provider is not None else {}
+        package_name = body.package_name or _extract_package_name(body.rego_content)
         context.update(
             {
                 "repo_path": repo.working_dir,
                 "module_path": body.module_path,
                 "commit_message": body.commit_message,
-                "package_name": body.package_name,
+                "rego_content": body.rego_content,
+                "package_name": package_name,
             }
         )
         try:
@@ -258,27 +190,40 @@ def init_policy_crud_router(pubsub_endpoint=None):
             context["current_rego"] = None
             context["module_exists_before"] = False
 
+        original_call = """
+repo_path = context["repo_path"]
+module_path = context["module_path"]
+rego_content = context["rego_content"]
+commit_message = context.get("commit_message", "Apply policy module change")
+hotfix_result = upsert_policy_module(repo_path, module_path, rego_content, commit_message)
+hotfix_result["rego_content"] = rego_content
+hotfix_result["previous_rego"] = context.get("current_rego")
+hotfix_result["module_exists_before"] = bool(context.get("module_exists_before"))
+hotfix_result["repo_path"] = repo_path
+if context.get("package_name"):
+    hotfix_result["package_name"] = context["package_name"]
+result = hotfix_result
+"""
+
         outcome = await handle_extension(
-            level=body.extension_level,
+            level=_policy_extension_level(body),
             extension_code=body.extension_code,
             task_description=body.task_description,
-            execution_mode=body.execution_mode,
+            execution_mode=_policy_execution_mode(body),
             reversal_code=body.reversal_code,
             extension_point=policy_hotfix,
-            default_fn=lambda: _default_apply_policy_hotfix(body),
+            default_fn=lambda: {
+                "status": "requires_extension",
+                "module_path": body.module_path,
+                "commit_message": body.commit_message,
+            },
             context=context,
             all_capabilities=_policy_hotfix_capabilities,
             goex_registry=goex_registry,
-            original_call=(
-                "result = {"
-                "'status': 'requires_extension', "
-                "'module_path': context.get('module_path'), "
-                "'commit_message': context.get('commit_message')"
-                "}"
-            ),
-            default_source=_default_apply_policy_hotfix,
-            endpoint_path="/policy/hotfix",
-            trigger_condition=lambda res: bool(body.extension_code) or bool(body.task_description),
+            original_call=original_call,
+            default_source=default_source,
+            endpoint_path=endpoint_path,
+            trigger_condition=lambda res: _policy_extension_requested(body),
             default_mutates=True,
         )
 
@@ -295,7 +240,7 @@ def init_policy_crud_router(pubsub_endpoint=None):
             response["extension_context"] = outcome.extension_context
         if outcome.ext_result.goex_record_id:
             response["goex_record_id"] = outcome.ext_result.goex_record_id
-            response["goex_mode"] = body.execution_mode == "goex"
+            response["goex_mode"] = _policy_execution_mode(body) == "goex"
             response["goex_reversal_code"] = outcome.ext_result.goex_reversal_code
 
         await _notify_policy_change()
@@ -303,7 +248,68 @@ def init_policy_crud_router(pubsub_endpoint=None):
 
     # -- CREATE -------------------------------------------------------------
 
-    @tool(name="create_policy_module", method="POST", path="/policy/modules")
+    @tool(
+        name="create_policy_module",
+        method="POST",
+        path="/policy/modules",
+        levels=["L0", "L1", "L2", "L3"],
+        level_params={
+            "L0": ["module_path", "rego_content", "commit_message"],
+            "L1": [
+                "module_path",
+                "rego_content",
+                "commit_message",
+                "package_name",
+                "extension_level",
+                "extension_code",
+                "execution_mode",
+                "reversal_code",
+            ],
+            "L2": [
+                "module_path",
+                "rego_content",
+                "commit_message",
+                "package_name",
+                "extension_level",
+                "extension_code",
+                "task_description",
+                "execution_mode",
+                "reversal_code",
+            ],
+            "L3": [
+                "module_path",
+                "rego_content",
+                "commit_message",
+                "package_name",
+                "extension_level",
+                "task_description",
+                "execution_mode",
+                "reversal_code",
+            ],
+        },
+        level_overrides={
+            "L1": {
+                "description": (
+                    "Create a policy module through this original endpoint. For L1 extension/goex runs, "
+                    "provide extension_code that uses policy-hotfix sandbox capabilities such as "
+                    "upsert_policy_module and read_policy_module."
+                ),
+            },
+            "L2": {
+                "description": (
+                    "Create a policy module through this original endpoint. For L2 extension/goex runs, "
+                    "provide task_description so server-side codegen can use the policy-hotfix sandbox."
+                ),
+            },
+            "L3": {
+                "description": (
+                    "Create a policy module through this original endpoint with source-aware extension/goex "
+                    "behavior. Provide task_description; the code generator sees this endpoint source and "
+                    "policy-hotfix capabilities."
+                ),
+            },
+        },
+    )
     @router.post("/policy/modules")
     async def create_policy_module(
         body: PolicyModuleCreate = Body(...),
@@ -314,6 +320,26 @@ def init_policy_crud_router(pubsub_endpoint=None):
         Writes the file and commits it locally. The new module is immediately
         visible in subsequent GET /policy bundle fetches.
         """
+        level = _policy_extension_level(body)
+        if level == "L4":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="L4 policy module mutations must use /symphony/code_extension",
+            )
+        if level in {"L1", "L2", "L3"}:
+            if _policy_execution_mode(body) == "goex" and not _policy_extension_requested(body):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="GoEx policy module mutations require extension_code or task_description",
+                )
+            if _policy_extension_requested(body):
+                return await _run_policy_module_extension(
+                    body=body,
+                    repo=repo,
+                    endpoint_path="/policy/modules",
+                    default_source=create_policy_module,
+                )
+
         if policy_module_exists(repo, body.module_path):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -345,7 +371,68 @@ def init_policy_crud_router(pubsub_endpoint=None):
 
     # -- UPDATE -------------------------------------------------------------
 
-    @tool(name="update_policy_module", method="PUT", path="/policy/modules")
+    @tool(
+        name="update_policy_module",
+        method="PUT",
+        path="/policy/modules",
+        levels=["L0", "L1", "L2", "L3"],
+        level_params={
+            "L0": ["module_path", "rego_content", "commit_message"],
+            "L1": [
+                "module_path",
+                "rego_content",
+                "commit_message",
+                "package_name",
+                "extension_level",
+                "extension_code",
+                "execution_mode",
+                "reversal_code",
+            ],
+            "L2": [
+                "module_path",
+                "rego_content",
+                "commit_message",
+                "package_name",
+                "extension_level",
+                "extension_code",
+                "task_description",
+                "execution_mode",
+                "reversal_code",
+            ],
+            "L3": [
+                "module_path",
+                "rego_content",
+                "commit_message",
+                "package_name",
+                "extension_level",
+                "task_description",
+                "execution_mode",
+                "reversal_code",
+            ],
+        },
+        level_overrides={
+            "L1": {
+                "description": (
+                    "Update a policy module through this original endpoint. For L1 extension/goex runs, "
+                    "provide extension_code that uses policy-hotfix sandbox capabilities such as "
+                    "upsert_policy_module and read_policy_module."
+                ),
+            },
+            "L2": {
+                "description": (
+                    "Update a policy module through this original endpoint. For L2 extension/goex runs, "
+                    "provide task_description so server-side codegen can use the policy-hotfix sandbox."
+                ),
+            },
+            "L3": {
+                "description": (
+                    "Update a policy module through this original endpoint with source-aware extension/goex "
+                    "behavior. Provide task_description; the code generator sees this endpoint source and "
+                    "policy-hotfix capabilities."
+                ),
+            },
+        },
+    )
     @router.put("/policy/modules")
     async def update_policy_module(
         body: PolicyModuleUpdate = Body(...),
@@ -356,6 +443,26 @@ def init_policy_crud_router(pubsub_endpoint=None):
         Overwrites the file contents and commits the change locally. The update
         is immediately visible in subsequent GET /policy bundle fetches.
         """
+        level = _policy_extension_level(body)
+        if level == "L4":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="L4 policy module mutations must use /symphony/code_extension",
+            )
+        if level in {"L1", "L2", "L3"}:
+            if _policy_execution_mode(body) == "goex" and not _policy_extension_requested(body):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="GoEx policy module mutations require extension_code or task_description",
+                )
+            if _policy_extension_requested(body):
+                return await _run_policy_module_extension(
+                    body=body,
+                    repo=repo,
+                    endpoint_path="/policy/modules",
+                    default_source=update_policy_module,
+                )
+
         if not policy_module_exists(repo, body.module_path):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

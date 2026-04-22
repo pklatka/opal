@@ -639,18 +639,13 @@ async def healthcheck() -> str:
     return json.dumps(data, indent=2)
 
 
-@mcp.tool(
-    description=_get_desc(
-        "apply_policy_hotfix",
-        "Run the predefined OPAL policy-hotfix extension hook for L1-L3.",
-        benchmark_note=True,
-    )
-)
-async def apply_policy_hotfix(
+@mcp.tool(description=_get_desc("create_policy_module", "Create a Rego policy module."))
+async def create_policy_module(
     module_path: str,
-    commit_message: str = "Apply policy hotfix",
+    rego_content: str,
+    commit_message: str = "Create policy module",
     package_name: str | None = None,
-    extension_level: str = "L1",
+    extension_level: str = "L0",
     extension_code: str | None = None,
     task_description: str | None = None,
     execution_mode: str = "direct",
@@ -658,6 +653,7 @@ async def apply_policy_hotfix(
 ) -> str:
     body: dict[str, Any] = {
         "module_path": module_path,
+        "rego_content": rego_content,
         "commit_message": commit_message,
         "extension_level": extension_level,
         "execution_mode": _resolve_execution_mode(execution_mode),
@@ -670,35 +666,38 @@ async def apply_policy_hotfix(
         body["task_description"] = task_description
     if reversal_code is not None:
         body["reversal_code"] = reversal_code
-    data = await _post("/policy/hotfix", body, headers=_client_headers())
+    data = await _post("/policy/modules", body, headers=_client_headers())
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
-async def create_policy_module(
-    module_path: str,
-    rego_content: str,
-    commit_message: str = "Create policy module",
-) -> str:
-    data = await _post("/policy/modules", {
-        "module_path": module_path,
-        "rego_content": rego_content,
-        "commit_message": commit_message,
-    }, headers=_client_headers())
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool()
+@mcp.tool(description=_get_desc("update_policy_module", "Update a Rego policy module."))
 async def update_policy_module(
     module_path: str,
     rego_content: str,
     commit_message: str = "Update policy module",
+    package_name: str | None = None,
+    extension_level: str = "L0",
+    extension_code: str | None = None,
+    task_description: str | None = None,
+    execution_mode: str = "direct",
+    reversal_code: str | None = None,
 ) -> str:
-    data = await _put("/policy/modules", {
+    body: dict[str, Any] = {
         "module_path": module_path,
         "rego_content": rego_content,
         "commit_message": commit_message,
-    }, headers=_client_headers())
+        "extension_level": extension_level,
+        "execution_mode": _resolve_execution_mode(execution_mode),
+    }
+    if package_name is not None:
+        body["package_name"] = package_name
+    if extension_code is not None:
+        body["extension_code"] = extension_code
+    if task_description is not None:
+        body["task_description"] = task_description
+    if reversal_code is not None:
+        body["reversal_code"] = reversal_code
+    data = await _put("/policy/modules", body, headers=_client_headers())
     return json.dumps(data, indent=2)
 
 

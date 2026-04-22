@@ -78,13 +78,13 @@ goex_registry = GoExRegistry(auto_approve=False, auto_approve_readonly=True)
 | Extension Point | Description | Endpoint |
 |---|---|---|
 | `post_policy_bundle` | Filter, transform, or augment policy bundles before serving | `GET /policy` |
-| `policy_hotfix` | Create or revise an emergency policy module via the tracked Git repo | `POST /policy/hotfix` for L1-L3, `POST /symphony/code_extension` for L4 |
+| `policy_hotfix` | Create or revise an emergency policy module via the tracked Git repo | Existing `POST`/`PUT /policy/modules` endpoints for L1-L3, `POST /symphony/code_extension` for L4 |
 | `post_data_update` | Validate, filter, deduplicate, or transform data entries before publishing | `POST /data/config` |
 | `post_statistics` | Compute aggregates, detect anomalies, or reformat statistics | `GET /statistics` |
 
 ## Policy CRUD Tools
 
-LLM agents can manage Rego policy modules directly via MCP tools that map to the `/policy/modules` REST endpoints. Each mutation writes to the local Git clone and commits the change, so the standard `GET /policy` bundle-serving path picks it up immediately.
+LLM agents can manage Rego policy modules directly via MCP tools that map to the `/policy/modules` REST endpoints. Each mutation writes to the local Git clone and commits the change, so the standard `GET /policy` bundle-serving path picks it up immediately. L1-L3 reversible extension/goex behavior is carried by optional parameters on these same endpoints; no separate hotfix endpoint is added.
 
 | MCP Tool | HTTP Method | Description |
 |---|---|---|
@@ -92,7 +92,7 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 | `create_policy_module` | `POST /policy/modules` | Write a new `.rego` file and commit; returns `old_hash` / `new_hash` |
 | `update_policy_module` | `PUT /policy/modules` | Overwrite an existing `.rego` file and commit |
 | `delete_policy_module` | `DELETE /policy/modules` | Remove a `.rego` file and commit; shows in `deleted_files` for diff bundles |
-**Request body fields (create / update):** `module_path` (repo-relative, e.g. `compliance/block.rego`), `rego_content` (raw Rego source), `commit_message` (optional).
+**Request body fields (create / update):** `module_path` (repo-relative, e.g. `compliance/block.rego`), `rego_content` (raw Rego source), `commit_message` (optional). Extension/goex runs may also include `extension_level`, `extension_code`, `task_description`, `execution_mode`, `reversal_code`, and `package_name`.
 
 **Change detection:** After a CRUD commit, fetching a differential bundle with `base_hash` set to the pre-mutation hash correctly reports additions, modifications, and deletions through OPAL's standard `BundleMaker.make_diff_bundle` mechanism.
 
@@ -101,10 +101,9 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 | Method | Path | Levels | Description |
 |---|---|---|---|
 | `GET` | `/policy` | L0–L3 | Fetch policy bundle from tracked Git repository |
-| `POST` | `/policy/hotfix` | L1–L3 | Predefined policy-hotfix extension hook |
 | `GET` | `/policy/modules` | — | List all Rego policy modules in the repository |
-| `POST` | `/policy/modules` | — | Create a new Rego policy module (Git commit) |
-| `PUT` | `/policy/modules` | — | Update an existing Rego policy module (Git commit) |
+| `POST` | `/policy/modules` | L0–L3 | Create a new Rego policy module (Git commit); optional L1-L3 extension/goex parameters use the same endpoint |
+| `PUT` | `/policy/modules` | L0–L3 | Update an existing Rego policy module (Git commit); optional L1-L3 extension/goex parameters use the same endpoint |
 | `DELETE` | `/policy/modules` | — | Delete a Rego policy module (Git commit) |
 | `POST` | `/data/config` | L0–L3 | Publish data update to OPAL clients |
 | `GET` | `/data/config` | — | Get base data source configuration |
