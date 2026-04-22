@@ -233,7 +233,6 @@ def init_data_updates_router(
         - **L1**: Post-processing via extension_code (validate, filter, deduplicate)
         - **L2**: Auto-generated extension code for advanced entry processing
         - **L3**: Source-aware — LLM reads endpoint code and generates extensions
-        - **L4**: Freeform extension on the /data/config route using the live update context
 
         Extension fields (extension_level, extension_code, task_description,
         execution_mode, reversal_code) are part of the JSON request body to

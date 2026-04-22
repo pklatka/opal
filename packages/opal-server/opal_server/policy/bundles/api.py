@@ -252,7 +252,6 @@ async def get_policy(
     - **L1**: Post-processing via extension_code (filter, transform bundle)
     - **L2**: Auto-generated extension code for advanced bundle processing
     - **L3**: Source-aware — LLM reads endpoint code and generates extensions
-    - **L4**: Freeform extension on the /policy route using the same bundle context
 
     Extension fields (extension_level, extension_code, task_description,
     execution_mode, reversal_code) are accepted as a JSON request body to

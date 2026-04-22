@@ -78,7 +78,7 @@ goex_registry = GoExRegistry(auto_approve=False, auto_approve_readonly=True)
 | Extension Point | Description | Endpoint |
 |---|---|---|
 | `post_policy_bundle` | Filter, transform, or augment policy bundles before serving | `GET /policy` |
-| `policy_hotfix` | Create or revise an emergency policy module via the tracked Git repo | `POST /symphony/code_extension` |
+| `policy_hotfix` | Create or revise an emergency policy module via the tracked Git repo | `POST /policy/hotfix` for L1-L3, `POST /symphony/code_extension` for L4 |
 | `post_data_update` | Validate, filter, deduplicate, or transform data entries before publishing | `POST /data/config` |
 | `post_statistics` | Compute aggregates, detect anomalies, or reformat statistics | `GET /statistics` |
 
@@ -101,6 +101,7 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 | Method | Path | Levels | Description |
 |---|---|---|---|
 | `GET` | `/policy` | L0–L3 | Fetch policy bundle from tracked Git repository |
+| `POST` | `/policy/hotfix` | L1–L3 | Predefined policy-hotfix extension hook |
 | `GET` | `/policy/modules` | — | List all Rego policy modules in the repository |
 | `POST` | `/policy/modules` | — | Create a new Rego policy module (Git commit) |
 | `PUT` | `/policy/modules` | — | Update an existing Rego policy module (Git commit) |
@@ -114,7 +115,7 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 | `POST` | `/symphony/code_extension` | L4 | Freeform code generation from capabilities (L4 entry point) |
 | `GET` | `/symphony/goex/records` | — | GoEx SRE endpoints |
 
-> **L4 note:** At L4 the agent sends a freeform prompt to `POST /symphony/code_extension`, which generates and executes code using the registered capabilities directly. The utility endpoints remain visible at L4 for exploration.
+> **L4 note:** At L4 the agent sends a freeform prompt to `POST /symphony/code_extension`, which generates and executes code using registered capabilities directly. Ordinary endpoint and utility MCP tools are not exposed at L4; equivalent behavior must be reached through code-extension capabilities.
 
 ## Quick Start
 
@@ -136,7 +137,7 @@ uv run python agent_cli.py --level L1 "Fetch the policy bundle but only return m
 uv run python agent_cli.py --level L2 "Get server statistics and summarize client subscription counts per topic"
 ```
 
-For server-side code generation (L2/L3/L4), start the server with:
+For server-side code generation (L2/L3 endpoint extensions and L4 code-extension flows), start the server with:
 
 ```bash
 OPAL_REPO_WATCHER_ENABLED=false OPAL_PUBLISHER_ENABLED=false OPAL_STATISTICS_ENABLED=true \

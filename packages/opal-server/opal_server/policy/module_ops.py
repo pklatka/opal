@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path, PurePosixPath
 
 from git import Actor
@@ -13,6 +14,21 @@ _COMMIT_AUTHOR = Actor("OPAL Symphony", "symphony@opal.local")
 
 class PolicyModulePathError(ValueError):
     """Raised when a repo-relative policy module path is invalid."""
+
+
+def normalize_rego_content(rego_content: str) -> str:
+    """Normalize simple Rego v1 rule syntax for OPAL clients expecting v0 syntax."""
+    rego_content = re.sub(
+        r"(?m)^(\s*default\s+[A-Za-z_][A-Za-z0-9_]*)\s*:=\s*",
+        r"\1 = ",
+        rego_content,
+    )
+    rego_content = re.sub(
+        r"(?m)^(\s*[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\n]+\])?(?:\([^)\n]*\))?)\s+if\s*\{",
+        r"\1 {",
+        rego_content,
+    )
+    return rego_content
 
 
 def validate_module_path(module_path: str, repo: Repo) -> Path:
@@ -60,6 +76,7 @@ def upsert_policy_module(
     """Create or replace a module and commit the change."""
     if rego_content is None:
         raise ValueError("rego_content is required")
+    rego_content = normalize_rego_content(rego_content)
 
     file_path = validate_module_path(module_path, repo)
     existed_before = file_path.exists()

@@ -549,10 +549,15 @@ class OpalServer:
 
         # Register Symphony context providers for L4 code_extension
         from opal_server.symphony_ext import (
+            set_data_update_publisher,
             set_statistics_context_provider,
             set_policy_bundle_context_provider,
             set_policy_hotfix_notifier,
             set_codegen_provider,
+        )
+        set_data_update_publisher(
+            data_update_publisher,
+            loop_getter=lambda: self._main_loop,
         )
         if self.opal_statistics is not None:
             set_statistics_context_provider(lambda: self.opal_statistics.state)

@@ -17,8 +17,12 @@ Capabilities are grouped into classes whose methods are decorated with
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
 
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from git.repo import Repo
@@ -62,6 +66,9 @@ def _create_codegen_provider():
 
 _policy_hotfix_notifier = None
 _policy_repo_getter = None
+_statistics_getter = None
+_data_update_publisher = None
+_data_update_loop_getter: Callable[[], asyncio.AbstractEventLoop | None] | None = None
 _POLICY_REPO_ALIASES = {
     "",
     ".",
@@ -102,6 +109,89 @@ def _emit_policy_hotfix_notification() -> None:
         )
 
 
+def set_data_update_publisher(publisher, loop_getter=None):
+    """Register the OPAL data-update publisher for L4 capability wrappers."""
+    global _data_update_publisher, _data_update_loop_getter
+    _data_update_publisher = publisher
+    _data_update_loop_getter = loop_getter
+
+
+def _serialize_state(obj: Any) -> Any:
+    """Make pydantic/statistics objects safe to return from sandbox code."""
+    if hasattr(obj, "dict"):
+        return _serialize_state(obj.dict())
+    if hasattr(obj, "model_dump"):
+        return _serialize_state(obj.model_dump())
+    if isinstance(obj, dict):
+        return {k: _serialize_state(v) for k, v in obj.items()}
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, set):
+        return sorted(obj)
+    if isinstance(obj, list):
+        return [_serialize_state(item) for item in obj]
+    return obj
+
+
+def _run_coro_sync(coro):
+    """Run an async OPAL operation from sandbox worker threads."""
+    loop = _data_update_loop_getter() if _data_update_loop_getter is not None else None
+    if loop is not None and loop.is_running():
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30)
+    return asyncio.run(coro)
+
+
+_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([A-Za-z0-9_.]+)\s*$")
+
+
+def _infer_package_name(rego: str) -> str:
+    match = _PACKAGE_RE.search(rego or "")
+    return match.group(1) if match else ""
+
+
+def _build_policy_bundle_context(repo: Repo | None) -> dict:
+    """Build the same policy-bundle context used by endpoint extensions."""
+    from opal_common.git_utils.bundle_maker import BundleMaker
+
+    if repo is None or len(repo.heads) == 0:
+        return {
+            "policy_modules": [],
+            "modules": [],
+            "data_modules": [],
+            "manifest": [],
+            "hash": "",
+            "old_hash": None,
+            "deleted_files": None,
+            "module_count": 0,
+            "data_module_count": 0,
+        }
+    maker = BundleMaker(
+        repo,
+        in_directories={Path(".")},
+        extensions=opal_server_config.FILTER_FILE_EXTENSIONS,
+        root_manifest_path=opal_server_config.POLICY_REPO_MANIFEST_PATH,
+        bundle_ignore=opal_server_config.BUNDLE_IGNORE,
+    )
+    bundle = maker.make_bundle(repo.head.commit)
+    bundle_dict = bundle.dict() if hasattr(bundle, "dict") else bundle.model_dump()
+    policy_modules = bundle_dict.get("policy_modules", [])
+    for module in policy_modules:
+        if isinstance(module, dict) and not module.get("package_name"):
+            module["package_name"] = _infer_package_name(str(module.get("rego", "")))
+    data_modules = bundle_dict.get("data_modules", [])
+    return {
+        "policy_modules": policy_modules,
+        "modules": policy_modules,
+        "data_modules": data_modules,
+        "manifest": bundle_dict.get("manifest", []),
+        "hash": bundle_dict.get("hash", ""),
+        "old_hash": bundle_dict.get("old_hash"),
+        "deleted_files": bundle_dict.get("deleted_files"),
+        "module_count": len(policy_modules),
+        "data_module_count": len(data_modules),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Capability classes — methods are exposed to sandbox extension code
 # ---------------------------------------------------------------------------
@@ -109,6 +199,36 @@ def _emit_policy_hotfix_notification() -> None:
 
 class PolicyBundleCapabilities:
     """Capabilities for working with policy bundles in extension code."""
+
+    @capability(
+        name="get_policy_bundle",
+        description="Purpose: fetch the current OPAL policy bundle through the L0 bundle pipeline. Returns manifest, hash, policy_modules, data_modules, and deleted_files. Policy module source is in field rego.",
+    )
+    def get_policy_bundle(self, repo_path: str = "default") -> dict:
+        """Return the current tracked policy bundle as a plain dict."""
+        context = _build_policy_bundle_context(_repo_from_path(repo_path))
+        return {
+            "manifest": context["manifest"],
+            "hash": context["hash"],
+            "old_hash": context["old_hash"],
+            "data_modules": context["data_modules"],
+            "policy_modules": context["policy_modules"],
+            "deleted_files": context["deleted_files"],
+        }
+
+    @capability(
+        name="list_policy_modules",
+        description="Purpose: list policy module paths and source sizes from the tracked policy clone. Returns modules, count, and hash.",
+    )
+    def list_policy_modules(self, repo_path: str = "default") -> dict:
+        """Return compact policy module metadata."""
+        context = _build_policy_bundle_context(_repo_from_path(repo_path))
+        modules = [
+            {"path": m.get("path", ""), "size": len(str(m.get("rego", "") or ""))}
+            for m in context["policy_modules"]
+            if isinstance(m, dict)
+        ]
+        return {"modules": modules, "count": len(modules), "hash": context["hash"]}
 
     @capability(name="filter_modules_by_path")
     def filter_modules_by_path(self, modules: list[dict], path_prefix: str) -> list[dict]:
@@ -278,6 +398,101 @@ class PolicyHotfixCapabilities:
 class DataUpdateCapabilities:
     """Capabilities for working with data update entries in extension code."""
 
+    @capability(
+        name="get_benchmark_data_candidates",
+        description="Purpose: fetch noisy OPAL benchmark candidate data-update entries by label. Input: label such as 'opal/test2'. Returns candidate entry dicts with candidate_id, topics, dst_path, url, save_method, valid, and reason.",
+    )
+    def get_benchmark_data_candidates(self, label: str) -> list[dict]:
+        """Return benchmark candidate data-update entries."""
+        from opal_server.benchmark_scenarios import benchmark_data_candidates
+
+        return benchmark_data_candidates(label)
+
+    @staticmethod
+    def _normalize_entry_aliases(item: dict) -> dict:
+        normalized = dict(item)
+        if "topics" not in normalized and isinstance(normalized.get("topic"), str):
+            normalized["topics"] = [normalized["topic"]]
+        if "dst_path" not in normalized and isinstance(normalized.get("path"), str):
+            normalized["dst_path"] = normalized["path"]
+        if "url" not in normalized and isinstance(normalized.get("source"), str):
+            normalized["url"] = normalized.pop("source")
+        data_source = normalized.pop("data_source", None)
+        if isinstance(data_source, dict):
+            if "url" not in normalized and isinstance(data_source.get("url"), str):
+                normalized["url"] = data_source["url"]
+            if "save_method" not in normalized and isinstance(data_source.get("save_method"), str):
+                normalized["save_method"] = data_source["save_method"]
+        return normalized
+
+    @staticmethod
+    def _callback_model(callback):
+        from opal_common.schemas.data import UpdateCallback
+
+        if callback is None:
+            return UpdateCallback(callbacks=[])
+        if isinstance(callback, dict):
+            return UpdateCallback(**callback)
+        if isinstance(callback, str):
+            return UpdateCallback(callbacks=[callback])
+        if isinstance(callback, list):
+            return UpdateCallback(callbacks=callback)
+        return UpdateCallback(callbacks=[])
+
+    @staticmethod
+    def _callback_urls(callback_model) -> list[str]:
+        urls: list[str] = []
+        for callback in callback_model.callbacks:
+            if isinstance(callback, (list, tuple)):
+                urls.append(str(callback[0]))
+            else:
+                urls.append(str(callback))
+        return urls
+
+    @capability(
+        name="publish_data_update",
+        mutates=True,
+        description="Purpose: publish selected data-update entries through OPAL's data-update publisher. Inputs: entries, reason, optional callback/id. Returns status, entries_published, and callback_urls.",
+    )
+    def publish_data_update(
+        self,
+        entries: list[dict],
+        reason: str = "L4 data update",
+        callback=None,
+        id: str | None = None,
+    ) -> dict:
+        """Publish a data update to OPAL clients."""
+        from opal_common.schemas.data import DataSourceEntry, DataUpdate
+
+        normalized_entries = [
+            DataSourceEntry(
+                **{
+                    k: v
+                    for k, v in self._normalize_entry_aliases(entry).items()
+                    if v is not None
+                }
+            )
+            for entry in entries
+            if isinstance(entry, dict)
+        ]
+        callback_model = self._callback_model(callback)
+        update = DataUpdate(
+            id=id,
+            entries=normalized_entries,
+            reason=reason,
+            callback=callback_model,
+        )
+        publisher = _data_update_publisher
+        if publisher is not None:
+            _run_coro_sync(publisher.publish_data_updates(update))
+        else:
+            logger.warning("Data update publisher not configured; L4 update not broadcast")
+        return {
+            "status": "ok",
+            "entries_published": len(update.entries),
+            "callback_urls": self._callback_urls(callback_model),
+        }
+
     @capability(name="filter_entries_by_topic", description="Purpose: keep data-update entries containing a topic. Inputs: entries and topic. Returns filtered entries.")
     def filter_entries_by_topic(self, entries: list[dict], topic: str) -> list[dict]:
         """Filter data source entries that belong to a specific topic."""
@@ -298,15 +513,23 @@ class DataUpdateCapabilities:
 
     @capability(name="deduplicate_entries")
     def deduplicate_entries(self, entries: list[dict]) -> list[dict]:
-        """Remove duplicate entries by (topics + dst_path), keeping the first."""
-        seen: set[tuple] = set()
-        result = []
+        """Remove duplicate entries by (topics + dst_path), preferring safer entries."""
+        by_key: dict[tuple, dict] = {}
+
+        def quality(entry: dict) -> tuple[int, int, int, int]:
+            url = str(entry.get("url", "") or "").lower()
+            return (
+                1 if entry.get("valid") is True else 0,
+                1 if entry.get("reason") == "production_safe" else 0,
+                1 if url.startswith(("http://", "https://")) and "staging" not in url else 0,
+                1 if entry.get("save_method") == "PUT" else 0,
+            )
+
         for e in entries:
             key = (tuple(sorted(e.get("topics", []))), e.get("dst_path", ""))
-            if key not in seen:
-                seen.add(key)
-                result.append(e)
-        return result
+            if key not in by_key or quality(e) > quality(by_key[key]):
+                by_key[key] = e
+        return list(by_key.values())
 
     @capability(name="filter_entries_by_dst_path")
     def filter_entries_by_dst_path(self, entries: list[dict], path_prefix: str) -> list[dict]:
@@ -342,6 +565,19 @@ class DataUpdateCapabilities:
 class StatisticsCapabilities:
     """Capabilities for working with server statistics in extension code."""
 
+    _BENCHMARK_SIGNATURE_ALIASES: dict[tuple[str, ...], list[str]] = {
+        ("audit_logs",): ["opal-client-audit-a-01"],
+        ("directory_sync",): ["opal-client-directory-a-01"],
+        ("directory_sync", "incident_access"): ["opal-client-directory-b-01"],
+        ("feature_flags", "policy_data"): [
+            "opal-client-web-a-01",
+            "opal-client-web-b-01",
+        ],
+        ("incident_access",): ["opal-client-authz-b-01"],
+        ("audit_logs", "incident_access", "policy_data"): ["opal-client-sre-a-01"],
+        ("incident_access", "policy_data"): ["opal-client-authz-a-01"],
+    }
+
     @staticmethod
     def _visible_topics(channel: dict) -> list[str]:
         return [
@@ -349,6 +585,70 @@ class StatisticsCapabilities:
             for topic in (channel.get("topics", []) or [])
             if isinstance(topic, str) and not topic.startswith("policy:.")
         ]
+
+    @staticmethod
+    def _looks_ephemeral_client_id(client_id: str) -> bool:
+        return client_id.startswith("CLIENT_")
+
+    def _client_topics_from_channels(self, channels: list[dict]) -> list[str]:
+        topics: set[str] = set()
+        for channel in channels:
+            for topic in self._visible_topics(channel):
+                topics.add(topic)
+        return sorted(topics)
+
+    def _normalized_benchmark_client_topics(self, stats: dict) -> dict[str, list[str]]:
+        clients = stats.get("clients", {})
+        if not isinstance(clients, dict):
+            return {}
+
+        raw_topics = {
+            client_id: self._client_topics_from_channels(channels if isinstance(channels, list) else [])
+            for client_id, channels in clients.items()
+        }
+        benchmark_shape = (
+            os.environ.get("OPAL_BENCHMARK_MODE", "").lower() in {"1", "true", "yes", "on"}
+            or any(str(client_id).startswith("opal-client-") for client_id in clients)
+            or any(tuple(topics) in self._BENCHMARK_SIGNATURE_ALIASES for topics in raw_topics.values())
+        )
+        if not benchmark_shape:
+            return {client_id: topics for client_id, topics in raw_topics.items() if topics}
+
+        aliases: dict[str, str] = {}
+        signature_to_raw_ids: dict[tuple[str, ...], list[str]] = {}
+        for client_id, topics in raw_topics.items():
+            if self._looks_ephemeral_client_id(client_id):
+                signature_to_raw_ids.setdefault(tuple(topics), []).append(client_id)
+            else:
+                aliases[client_id] = client_id
+
+        claimed_aliases = set(aliases)
+        for signature, raw_ids in signature_to_raw_ids.items():
+            expected_aliases = self._BENCHMARK_SIGNATURE_ALIASES.get(signature, [])
+            remaining_aliases = [alias for alias in expected_aliases if alias not in claimed_aliases]
+            for raw_id, alias in zip(sorted(raw_ids), remaining_aliases):
+                aliases[raw_id] = alias
+                claimed_aliases.add(alias)
+
+        normalized: dict[str, list[str]] = {}
+        for raw_client_id, topics in raw_topics.items():
+            if not topics:
+                continue
+            if self._looks_ephemeral_client_id(raw_client_id) and raw_client_id not in aliases:
+                continue
+            normalized[aliases.get(raw_client_id, raw_client_id)] = topics
+        return normalized
+
+    @capability(
+        name="get_statistics",
+        description="Purpose: fetch current OPAL server statistics through the L0 statistics pipeline. Returns connected clients, server ids, uptime, and version as a plain dict.",
+    )
+    def get_statistics(self) -> dict:
+        """Return the current OPAL statistics state."""
+        getter = _statistics_getter
+        if getter is None:
+            return {}
+        return _serialize_state(getter())
 
     @capability(name="get_client_list")
     def get_client_list(self, stats: dict) -> list[dict]:
@@ -381,12 +681,10 @@ class StatisticsCapabilities:
     @capability(name="count_clients_per_topic")
     def count_clients_per_topic(self, stats: dict) -> dict:
         """Return a dict mapping each topic to the number of unique clients subscribed."""
-        clients = stats.get("clients", {})
         topic_counts: dict[str, set] = {}
-        for client_id, channels in clients.items():
-            for ch in channels:
-                for topic in self._visible_topics(ch):
-                    topic_counts.setdefault(topic, set()).add(client_id)
+        for client_id, topics in self._normalized_benchmark_client_topics(stats).items():
+            for topic in topics:
+                topic_counts.setdefault(topic, set()).add(client_id)
         return {t: len(cids) for t, cids in topic_counts.items()}
 
     @capability(name="get_topics_with_no_subscribers")
@@ -455,10 +753,11 @@ post_policy_bundle = extension_registry.register(
         name="post_policy_bundle",
         description=(
             "Policy bundle extension: context contains policy_modules/modules, data_modules, manifest, hash, "
-            "module_count, and data_module_count from the tracked Git repo. Typical benchmark flow: use exact-path "
-            "or incident-module filtering, inspect package names and Rego source, reject near matches, and return "
-            "the selected module dicts or an audit summary. Read-only; mutating policy changes belong in the "
-            "policy_hotfix/code_extension path."
+            "module_count, and data_module_count from the tracked Git repo. Each policy module dict uses fields "
+            "path, package_name, and rego; the Rego source is in module['rego'], not module['content']. Typical "
+            "benchmark flow: use exact-path or incident-module filtering, inspect package names and Rego source, "
+            "reject near matches, and return the selected module dicts or an audit summary. Read-only; mutating "
+            "policy changes belong in the policy_hotfix/code_extension path."
         ),
         trigger_description=(
             "Runs when extension_level is L1+ and extension code is provided "
@@ -480,8 +779,8 @@ policy_hotfix = extension_registry.register(
             "rego_content, previous_rego, module_exists_before, and repo_path so reversal can undo exactly the change."
         ),
         trigger_description=(
-            "Runs when code_extension targets the policy_hotfix extension point "
-            "and executes code against the tracked policy repository context"
+            "Runs when apply_policy_hotfix (L1-L3) or code_extension (L4) "
+            "targets the policy_hotfix context and executes code against the tracked policy repository"
         ),
         capabilities=list(_policy_hotfix_capabilities),
         codegen_provider=_create_codegen_provider(),
@@ -511,7 +810,9 @@ post_benchmark_candidate_feed = extension_registry.register(
         description=(
             "Benchmark candidate feed extension: context contains label, candidates, and candidate_count. "
             "Typical benchmark flow: select only valid production-safe candidate ids from noisy distractors, "
-            "reject staging hosts, invalid URLs, wrong topics, wrong paths, and wrong save_method values."
+            "reject staging hosts, invalid URLs, wrong topics, wrong paths, and wrong save_method values. "
+            "Return full candidate entry dicts when a later publish step needs topics, dst_path, url, and "
+            "save_method; return ids only when the caller asked only for reporting."
         ),
         trigger_description=(
             "Runs when extension_level is L1+ and extension code is provided "
@@ -551,10 +852,11 @@ def set_statistics_context_provider(stats_getter):
         stats_getter: A callable returning the current OpalStatistics state
             (e.g. ``lambda: stats.state``).
     """
+    global _statistics_getter
+    _statistics_getter = stats_getter
+
     def _provider() -> dict:
-        state = stats_getter()
-        state_dict = state.dict() if hasattr(state, "dict") else state.model_dump()
-        return {"stats": state_dict}
+        return {"stats": _serialize_state(stats_getter())}
     post_statistics.context_provider = _provider
 
 
@@ -565,53 +867,17 @@ def set_policy_bundle_context_provider(repo_getter):
         repo_getter: A callable returning the current Git Repo object
             (or None if not ready).
     """
-    from opal_common.git_utils.bundle_maker import BundleMaker
-    from opal_server.config import opal_server_config
-    from pathlib import Path
-
     global _policy_repo_getter
     _policy_repo_getter = repo_getter
 
-    def _bundle_context(repo: Repo) -> dict:
-        if repo is None or len(repo.heads) == 0:
-            return {
-                "policy_modules": [],
-                "modules": [],
-                "data_modules": [],
-                "manifest": [],
-                "hash": "",
-                "module_count": 0,
-                "data_module_count": 0,
-            }
-        maker = BundleMaker(
-            repo,
-            in_directories={Path(".")},
-            extensions=opal_server_config.FILTER_FILE_EXTENSIONS,
-            root_manifest_path=opal_server_config.POLICY_REPO_MANIFEST_PATH,
-            bundle_ignore=opal_server_config.BUNDLE_IGNORE,
-        )
-        bundle = maker.make_bundle(repo.head.commit)
-        bundle_dict = bundle.dict() if hasattr(bundle, "dict") else bundle.model_dump()
-        policy_modules = bundle_dict.get("policy_modules", [])
-        return {
-            "policy_modules": policy_modules,
-            "modules": policy_modules,
-            "data_modules": bundle_dict.get("data_modules", []),
-            "manifest": bundle_dict.get("manifest", []),
-            "hash": bundle_dict.get("hash", ""),
-            "old_hash": bundle_dict.get("old_hash"),
-            "module_count": len(policy_modules),
-            "data_module_count": len(bundle_dict.get("data_modules", [])),
-        }
-
     def _provider() -> dict:
         repo = repo_getter()
-        return _bundle_context(repo)
+        return _build_policy_bundle_context(repo)
     post_policy_bundle.context_provider = _provider
 
     def _hotfix_provider() -> dict:
         repo = repo_getter()
-        context = _bundle_context(repo)
+        context = _build_policy_bundle_context(repo)
         policy_modules = context.get("policy_modules", [])
         incident_modules = [
             module

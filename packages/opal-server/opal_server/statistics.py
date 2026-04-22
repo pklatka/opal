@@ -518,7 +518,6 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
         - **L1**: Post-processing via extension_code (aggregation, alerting)
         - **L2**: Auto-generated extension code for advanced analytics
         - **L3**: Source-aware — LLM reads endpoint code and generates extensions
-        - **L4**: Freeform extension on the /statistics route using the live statistics context
 
         Extension fields are accepted as a JSON request body to avoid URL
         length limits on large extension_code payloads.

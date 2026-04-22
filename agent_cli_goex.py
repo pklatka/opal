@@ -13,6 +13,7 @@ Usage (from repo root):
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import json
 import os
@@ -134,7 +135,7 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
         "You are running an OPAL GoEx round-trip test at L1. "
         "For each required mutation, use GoEx-enabled extension execution at this level with valid forward execution "
         "logic and valid reversal logic. Do not rely on direct baseline execution. In OPAL, the reversible mutation "
-        "should use the `code_extension` hotfix path rather than a read-only inspection step, a bundle "
+        "should use the predefined `apply_policy_hotfix` extension hook rather than a read-only inspection step, a bundle "
         "post-processing extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on "
         "the policy-hotfix capabilities exposed for that extension point; ordinary MCP/request tools are not "
         "available inside that extension code. Use the extension capability metadata to choose the appropriate "
@@ -147,7 +148,7 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
         "You are running an OPAL GoEx round-trip test at L2. "
         "For each required mutation, use GoEx-enabled execution at this level and request extension behavior "
         "with reversal support. Do not rely on direct baseline execution. In OPAL, the reversible mutation should "
-        "use the `code_extension` hotfix path rather than a read-only inspection step, a bundle post-processing "
+        "use the predefined `apply_policy_hotfix` extension hook rather than a read-only inspection step, a bundle post-processing "
         "extension, or raw policy CRUD fallback. Extension code for this hotfix should rely on the policy-hotfix "
         "capabilities exposed for that extension point; ordinary MCP/request tools are not available inside that "
         "extension code. Use the extension capability metadata to choose the appropriate helper calls. Apply exactly the requested mutation "
@@ -157,7 +158,7 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L3": (
         "You are running an OPAL GoEx round-trip test at L3. "
         "For each required mutation, use GoEx-enabled extension execution at this level with source-aware reversible "
-        "behavior. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather than a "
+        "behavior. In OPAL, the reversible mutation should use the source-aware `apply_policy_hotfix` extension hook rather than a "
         "read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code "
         "for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary "
         "MCP/request tools are not available inside that extension code. Use the extension capability metadata to "
@@ -183,7 +184,7 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
 
 DIRECT_SYSTEM_PROMPT = (
     "You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any "
-    "nonexistent apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether "
+    "apply_policy_hotfix endpoint. Use list_policy_modules if needed to determine whether "
     "the hotfix module already exists. If it already exists, call update_policy_module; otherwise call "
     "create_policy_module. Use module_path and commit_message from the task, and provide rego_content "
     "that implements the requested outage policy change. Follow the task's grading contract exactly and "
@@ -392,12 +393,99 @@ def _hotfix_snapshot_from_record(record: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
     raw_result = result.get("result")
-    snapshot = _flatten_hotfix_result(raw_result if isinstance(raw_result, dict) else None)
+    if isinstance(raw_result, dict):
+        snapshot = _flatten_hotfix_result(raw_result)
+    else:
+        results = result.get("results")
+        first = results[0] if isinstance(results, list) and results else None
+        snapshot = _flatten_hotfix_result(first if isinstance(first, dict) else None)
     if record.get("id"):
         snapshot.setdefault("goex_record_id", record["id"])
     if record.get("reversal_code"):
         snapshot.setdefault("goex_reversal_code", record["reversal_code"])
     return snapshot
+
+
+def _hotfix_snapshot_from_code(code: str | None) -> dict[str, Any]:
+    """Best-effort static recovery for generated policy-hotfix code.
+
+    Some older L4/GoEx runs printed a JSON payload instead of assigning it to
+    `result`, so the tool result may be empty even though the generated code
+    contains enough stable metadata for diagnostics.
+    """
+    if not isinstance(code, str) or "upsert_policy_module" not in code:
+        return {}
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+
+    string_values: dict[str, str] = {}
+    bool_values: dict[str, bool] = {}
+    snapshot: dict[str, Any] = {"action": "updated"}
+
+    def literal_value(node: ast.AST) -> Any:
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id in string_values:
+                return string_values[node.id]
+            if node.id in bool_values:
+                return bool_values[node.id]
+        return None
+
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = literal_value(node.value)
+        if isinstance(target, ast.Name):
+            if isinstance(value, str):
+                string_values[target.id] = value
+            elif isinstance(value, bool):
+                bool_values[target.id] = value
+        elif (
+            isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Name)
+            and target.value.id in {"hotfix_result", "result"}
+        ):
+            key = literal_value(target.slice)
+            if isinstance(key, str) and value is not None:
+                snapshot[key] = value
+
+    for key in ("repo_path", "module_path", "rego_content", "previous_rego", "package_name"):
+        if key not in snapshot and key in string_values:
+            snapshot[key] = string_values[key]
+    if "module_exists_before" not in snapshot and "module_exists_before" in bool_values:
+        snapshot["module_exists_before"] = bool_values["module_exists_before"]
+        snapshot["action"] = "updated" if bool_values["module_exists_before"] else "created"
+
+    return _flatten_hotfix_result(snapshot)
+
+
+def _code_contains_policy_mutation(code: str | None) -> bool:
+    if not isinstance(code, str):
+        return False
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+
+    mutating_names = {
+        "upsert_policy_module",
+        "delete_policy_module",
+        "create_policy_module",
+        "update_policy_module",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in mutating_names:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in mutating_names:
+            return True
+    return False
 
 
 def _is_valid_hotfix_snapshot(
@@ -468,18 +556,24 @@ def _wait_for_server_hotfix_state(
 def _normalize_hotfix_snapshot(name: str, data: dict[str, Any]) -> dict[str, Any] | None:
     if name in {"create_policy_module", "update_policy_module"}:
         return data
-    if name != "code_extension":
+    if name not in {"code_extension", "apply_policy_hotfix"}:
         return None
     snapshot: dict[str, Any] = {}
     results = data.get("results")
     if isinstance(results, list) and results and isinstance(results[0], dict):
         snapshot.update(_flatten_hotfix_result(results[0]))
+    code_snapshot = _hotfix_snapshot_from_code(data.get("generated_code"))
+    for key, value in code_snapshot.items():
+        snapshot.setdefault(key, value)
     if data.get("goex_record_id"):
         snapshot["goex_record_id"] = data["goex_record_id"]
     if data.get("goex_reversal_code"):
         snapshot["goex_reversal_code"] = data["goex_reversal_code"]
     if data.get("generated_code"):
         snapshot["generated_code"] = data["generated_code"]
+    has_hotfix_details = any(snapshot.get(key) for key in ("action", "module_path", "rego_content"))
+    if not has_hotfix_details and not _code_contains_policy_mutation(data.get("generated_code")):
+        return None
     return snapshot or None
 
 

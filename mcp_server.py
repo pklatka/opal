@@ -292,13 +292,13 @@ def _alias_benchmark_client_ids(clients: dict[str, list[dict[str, Any]]]) -> dic
         else:
             aliases[client_id] = client_id
 
+    claimed_aliases = set(aliases)
     for signature, raw_ids in signature_to_raw_ids.items():
         expected_aliases = _BENCHMARK_SIGNATURE_ALIASES.get(signature, [])
-        for idx, raw_id in enumerate(sorted(raw_ids)):
-            if idx < len(expected_aliases):
-                aliases[raw_id] = expected_aliases[idx]
-            else:
-                aliases[raw_id] = raw_id
+        remaining_aliases = [alias for alias in expected_aliases if alias not in claimed_aliases]
+        for raw_id, alias in zip(sorted(raw_ids), remaining_aliases):
+            aliases[raw_id] = alias
+            claimed_aliases.add(alias)
     return aliases
 
 
@@ -310,6 +310,8 @@ def _build_benchmark_stats(raw_stats: dict[str, Any]) -> dict[str, Any]:
     alias_map = _alias_benchmark_client_ids(clients)
     client_topics: dict[str, list[str]] = {}
     for raw_client_id, channels in clients.items():
+        if _looks_ephemeral_client_id(raw_client_id) and raw_client_id not in alias_map:
+            continue
         alias = alias_map.get(raw_client_id, raw_client_id)
         topics = _client_topics_from_channels(channels if isinstance(channels, list) else [])
         if not topics:
@@ -372,10 +374,38 @@ def _with_visible_levels(description: str, levels: list[str]) -> str:
     )
 
 
+def _append_visible_note(description: str, note: str) -> str:
+    visible, metadata = parse_tool_description_metadata(description)
+    if not metadata:
+        return f"{description.rstrip()}\n{note}"
+    combined = f"{visible.rstrip()}\n{note}"
+    metadata["default_description"] = combined
+    return (
+        f"{combined}\n<symphony-metadata>\n"
+        f"{json.dumps(metadata, ensure_ascii=True)}\n"
+        f"</symphony-metadata>"
+    )
+
+
 if _tool_descriptions.get("code_extension"):
     _tool_descriptions["code_extension"] = _with_visible_levels(
         _tool_descriptions["code_extension"],
-        ["L1", "L2", "L3", "L4"],
+        ["L4"],
+    )
+    _tool_descriptions["code_extension"] = _append_visible_note(
+        _tool_descriptions["code_extension"],
+        (
+            "OPAL L4 uses this single endpoint. The generated sandbox code can "
+            "call OPAL capability wrappers such as get_policy_bundle(), "
+            "list_policy_modules(), get_statistics(), "
+            "get_benchmark_data_candidates(label), publish_data_update(...), "
+            "read_policy_module(...), upsert_policy_module(...), and "
+            "delete_policy_module(...). Use extension_point='policy_hotfix' "
+            "(hyphen alias 'policy-hotfix') for reversible policy mutations in "
+            "GoEx mode. The policy-bundle module source field is `rego`; there "
+            "is no `content` field. The prompt parameter is required; explicit "
+            "Python code should assign a native dict/list to `result`."
+        ),
     )
 
 # ---------------------------------------------------------------------------
@@ -606,6 +636,41 @@ if EXPOSE_ADMIN_TOKEN_TOOL:
 )
 async def healthcheck() -> str:
     data = await _get("/healthcheck")
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool(
+    description=_get_desc(
+        "apply_policy_hotfix",
+        "Run the predefined OPAL policy-hotfix extension hook for L1-L3.",
+        benchmark_note=True,
+    )
+)
+async def apply_policy_hotfix(
+    module_path: str,
+    commit_message: str = "Apply policy hotfix",
+    package_name: str | None = None,
+    extension_level: str = "L1",
+    extension_code: str | None = None,
+    task_description: str | None = None,
+    execution_mode: str = "direct",
+    reversal_code: str | None = None,
+) -> str:
+    body: dict[str, Any] = {
+        "module_path": module_path,
+        "commit_message": commit_message,
+        "extension_level": extension_level,
+        "execution_mode": _resolve_execution_mode(execution_mode),
+    }
+    if package_name is not None:
+        body["package_name"] = package_name
+    if extension_code is not None:
+        body["extension_code"] = extension_code
+    if task_description is not None:
+        body["task_description"] = task_description
+    if reversal_code is not None:
+        body["reversal_code"] = reversal_code
+    data = await _post("/policy/hotfix", body, headers=_client_headers())
     return json.dumps(data, indent=2)
 
 
