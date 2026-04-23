@@ -419,8 +419,8 @@ STANDARD_SCENARIOS: dict[str, StandardScenario] = {
 
 
 GOEX_SCENARIOS: dict[str, GoexScenario] = {
-    "current": GoexScenario(
-        case_id="current",
+    "test2": GoexScenario(
+        case_id="test2",
         label_stub="hotfix",
         module_path="incident/cache_failover_hotfix.rego",
         package_name="app.incident.cache_failover_hotfix",
@@ -553,6 +553,8 @@ def get_standard_scenario(label: str) -> StandardScenario:
 
 
 def get_goex_scenario(case_id: str) -> GoexScenario:
+    if case_id == "current":
+        case_id = "test2"
     return GOEX_SCENARIOS[case_id]
 
 

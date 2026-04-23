@@ -175,9 +175,17 @@ def _policy_results_include_mutation(
     for item in results or []:
         if not isinstance(item, dict):
             continue
-        if item.get("module_path") != module_path:
+        result_path = (
+            item.get("module_path")
+            or item.get("target_module_path")
+            or item.get("target_path")
+            or item.get("path")
+        )
+        if result_path != module_path:
             continue
         if item.get("action") in {"created", "updated"}:
+            return True
+        if item.get("source_policy_path") and item.get("outage_resolved") is True:
             return True
     return False
 

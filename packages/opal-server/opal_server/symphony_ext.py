@@ -157,7 +157,7 @@ def _run_coro_sync(coro):
     return asyncio.run(coro)
 
 
-_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([A-Za-z0-9_.]+)\s*$")
+_PACKAGE_RE = re.compile(r"(?m)^[ \t]*package[ \t]+([A-Za-z0-9_.]+)[ \t]*$")
 
 
 def _infer_package_name(rego: str) -> str:

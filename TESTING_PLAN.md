@@ -418,13 +418,13 @@ Current ranking key:
 Shell entrypoint:
 
 ```bash
-./scripts/run_opal_goex_tests.sh --cases "current test1 test3" anthropic haiku
+./scripts/run_opal_goex_tests.sh --cases "test2 test1 test3" anthropic haiku
 ```
 
 Current runner behavior:
 
 - default levels: `L1 L2 L3 L4`
-- default cases: `current test1 test3`
+- default cases: `test2 test1 test3`
 - `L0` runs `--execution-mode direct`
 - `L1` through `L4` run `--execution-mode goex`
 - each case calls benchmark reset before execution
@@ -493,7 +493,7 @@ You are running an OPAL GoEx round-trip test at L3. For each required mutation, 
 You are running an OPAL GoEx round-trip test at L4. Use GoEx-enabled reversible execution at this level. In OPAL, perform the reversible mutation through `code_extension`. The forward path should perform only the requested mutation, leave it applied, and assign the final structured payload to the expected result variable. Do not perform exploratory or debugging mutations. Keep the hotfix in a single `code_extension` execution. The reversal path must undo the created or updated module using the execution result. Ensure that result exposes stable hotfix details, including `module_path`, `package_name`, `action`, and `rego_content`.
 ```
 
-### GoEx Case: `current`
+### GoEx Case: `test2`
 
 Task prompt:
 

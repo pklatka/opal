@@ -652,6 +652,8 @@ async def create_policy_module(
     execution_mode: str = "direct",
     reversal_code: str | None = None,
 ) -> str:
+    if "&" in rego_content:
+        rego_content = html.unescape(rego_content)
     body: dict[str, Any] = {
         "module_path": module_path,
         "rego_content": rego_content,
@@ -683,6 +685,8 @@ async def update_policy_module(
     execution_mode: str = "direct",
     reversal_code: str | None = None,
 ) -> str:
+    if "&" in rego_content:
+        rego_content = html.unescape(rego_content)
     body: dict[str, Any] = {
         "module_path": module_path,
         "rego_content": rego_content,

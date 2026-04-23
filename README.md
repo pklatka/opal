@@ -279,12 +279,12 @@ Standard-suite verification:
 Run the GoEx matrix:
 
 ```bash
-./scripts/run_opal_goex_tests.sh --levels "L0 L1 L2 L3 L4" --cases "current test1 test3" anthropic haiku
+./scripts/run_opal_goex_tests.sh --levels "L0 L1 L2 L3 L4" --cases "test2 test1 test3" anthropic haiku
 ```
 
 GoEx cases:
 
-- `current`: existing cache-failover hotfix scenario
+- `test2`: existing cache-failover hotfix scenario
 - `test1`: update `incident/payments_outage_gate.rego` through GoEx and then
   reverse it
 - `test3`: create `incident/payments_replica_promote_hotfix.rego` through GoEx

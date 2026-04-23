@@ -127,7 +127,7 @@ class _CodegenWebsocketClient:
         return {"ok": True, "content": "".join(parts) or resp.content}
 
 
-DEFAULT_SCENARIO = get_goex_scenario("current")
+DEFAULT_SCENARIO = get_goex_scenario("test2")
 HOTFIX_MODULE_PATH = DEFAULT_SCENARIO.module_path
 
 GOEX_SYSTEM_PROMPTS: dict[str, str] = {
@@ -1559,8 +1559,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--case",
-        choices=["current", "test1", "test3"],
-        default="current",
+        choices=["test2", "test1", "test3", "current"],
+        default="test2",
     )
     parser.add_argument(
         "--provider",
