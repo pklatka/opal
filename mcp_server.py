@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -721,7 +722,7 @@ async def list_policy_modules() -> str:
 
 @mcp.tool(description=_get_desc("code_extension", "Submit a prompt to the code extension endpoint."))
 async def code_extension(
-    prompt: str,
+    prompt: str = "Run the supplied code using the available extension capabilities.",
     extension_point: str | None = None,
     code: str | None = None,
     execution_mode: str = "direct",
@@ -732,7 +733,7 @@ async def code_extension(
     if extension_point is not None:
         body["extension_point"] = extension_point
     if code is not None:
-        body["code"] = code
+        body["code"] = html.unescape(code) if "&" in code else code
     if reversal_code is not None:
         body["reversal_code"] = reversal_code
     if context_overrides is not None:

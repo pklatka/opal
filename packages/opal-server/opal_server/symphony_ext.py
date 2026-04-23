@@ -73,9 +73,16 @@ _POLICY_REPO_ALIASES = {
     "",
     ".",
     "default",
+    "prod",
+    "production",
     "policy",
     "repo",
     "main",
+    "opal",
+    "benchmark",
+    "opal_benchmark",
+    "payments",
+    "incident",
     "bundle",
     "policy_repo",
     "policy_bundle",
@@ -158,6 +165,30 @@ def _infer_package_name(rego: str) -> str:
     return match.group(1) if match else ""
 
 
+def _package_name_from_module_path(module_path: str) -> str:
+    """Infer the benchmark's canonical app package from a repo-relative path."""
+    normalized = str(module_path or "").strip().strip("/")
+    if normalized.endswith(".rego"):
+        normalized = normalized[:-5]
+    parts = [
+        re.sub(r"[^A-Za-z0-9_]", "_", part)
+        for part in normalized.split("/")
+        if part
+    ]
+    return "app." + ".".join(parts) if parts else ""
+
+
+def _replace_rego_package(rego: str, package_name: str) -> str:
+    """Replace or insert a Rego package declaration using normal no-semicolon syntax."""
+    content = str(rego or "")
+    package_name = str(package_name or "").strip()
+    if not package_name:
+        return content
+    if _PACKAGE_RE.search(content):
+        return _PACKAGE_RE.sub(f"package {package_name}", content, count=1)
+    return f"package {package_name}\n\n{content.lstrip()}"
+
+
 def _build_policy_bundle_context(repo: Repo | None) -> dict:
     """Build the same policy-bundle context used by endpoint extensions."""
     from opal_common.git_utils.bundle_maker import BundleMaker
@@ -227,13 +258,18 @@ class PolicyBundleCapabilities:
 
     @capability(
         name="list_policy_modules",
-        description="Purpose: list policy module paths and source sizes from the tracked policy clone. Returns modules, count, and hash.",
+        description="Purpose: list policy modules from the tracked policy clone. Returns modules with path, package_name, rego source, size, count, and hash; search_module_content can operate on this output directly.",
     )
     def list_policy_modules(self, repo_path: str = "default") -> dict:
-        """Return compact policy module metadata."""
+        """Return policy modules with source so L4 code can compose helpers."""
         context = _build_policy_bundle_context(_repo_from_path(repo_path))
         modules = [
-            {"path": m.get("path", ""), "size": len(str(m.get("rego", "") or ""))}
+            {
+                "path": m.get("path", ""),
+                "package_name": m.get("package_name", ""),
+                "rego": str(m.get("rego", "") or ""),
+                "size": len(str(m.get("rego", "") or "")),
+            }
             for m in context["policy_modules"]
             if isinstance(m, dict)
         ]
@@ -258,9 +294,14 @@ class PolicyBundleCapabilities:
 
     @capability(name="search_module_content")
     def search_module_content(self, modules: list[dict], query: str) -> list[dict]:
-        """Search policy modules by matching query against Rego source code."""
+        """Search policy modules by matching query against Rego source, path, or package."""
         q = query.lower()
-        return [m for m in modules if q in m.get("rego", "").lower()]
+        return [
+            m for m in modules
+            if q in str(m.get("rego", "") or "").lower()
+            or q in str(m.get("path", "") or "").lower()
+            or q in str(m.get("package_name", "") or "").lower()
+        ]
 
     @capability(name="get_module_paths")
     def get_module_paths(self, modules: list[dict]) -> list[str]:
@@ -332,6 +373,14 @@ class PolicyHotfixCapabilities:
     """Capabilities for emergency policy hotfix mutations."""
 
     @capability(
+        name="rewrite_rego_package",
+        description="Purpose: safely rewrite or insert a Rego package declaration. Inputs: rego_content and package_name. Handles normal Rego package syntax without semicolons.",
+    )
+    def rewrite_rego_package(self, rego_content: str, package_name: str) -> str:
+        """Return Rego source whose package declaration matches package_name."""
+        return _replace_rego_package(rego_content, package_name)
+
+    @capability(
         name="read_policy_module",
         description="Purpose: read one Rego module from the tracked policy clone. Inputs: repo_path alias/path and module_path. Returns source text or None.",
     )
@@ -367,6 +416,9 @@ class PolicyHotfixCapabilities:
     ) -> dict:
         """Create or replace a Rego module and commit it."""
         try:
+            expected_package = _package_name_from_module_path(module_path)
+            if expected_package:
+                rego_content = _replace_rego_package(rego_content, expected_package)
             result = upsert_policy_module_in_repo(
                 _repo_from_path(repo_path),
                 module_path,
@@ -420,10 +472,15 @@ class DataUpdateCapabilities:
     @staticmethod
     def _normalize_entry_aliases(item: dict) -> dict:
         normalized = dict(item)
+        if "candidate_id" not in normalized and isinstance(normalized.get("id"), str):
+            normalized["candidate_id"] = normalized["id"]
         if "topics" not in normalized and isinstance(normalized.get("topic"), str):
             normalized["topics"] = [normalized["topic"]]
-        if "dst_path" not in normalized and isinstance(normalized.get("path"), str):
-            normalized["dst_path"] = normalized["path"]
+        if "dst_path" not in normalized:
+            for alias in ("destination_path", "path"):
+                if isinstance(normalized.get(alias), str):
+                    normalized["dst_path"] = normalized[alias]
+                    break
         if "url" not in normalized and isinstance(normalized.get("source"), str):
             normalized["url"] = normalized.pop("source")
         data_source = normalized.pop("data_source", None)
@@ -461,7 +518,7 @@ class DataUpdateCapabilities:
     @capability(
         name="publish_data_update",
         mutates=True,
-        description="Purpose: publish selected data-update entries through OPAL's data-update publisher. Inputs: entries, reason, optional callback/id. Returns status, entries_published, and callback_urls.",
+        description="Purpose: publish selected data-update entries through OPAL's data-update publisher. Inputs: entries, reason, optional callback/id. Returns status='ok' on successful publish, entries_published, and callback_urls.",
     )
     def publish_data_update(
         self,
@@ -505,18 +562,23 @@ class DataUpdateCapabilities:
     @capability(name="filter_entries_by_topic", description="Purpose: keep data-update entries containing a topic. Inputs: entries and topic. Returns filtered entries.")
     def filter_entries_by_topic(self, entries: list[dict], topic: str) -> list[dict]:
         """Filter data source entries that belong to a specific topic."""
-        return [e for e in entries if topic in e.get("topics", [])]
+        normalized = [self._normalize_entry_aliases(e) for e in entries if isinstance(e, dict)]
+        return [e for e in normalized if topic in e.get("topics", [])]
 
     @capability(name="exclude_entries_by_topic", description="Purpose: drop data-update entries containing a topic. Inputs: entries and topic. Returns filtered entries.")
     def exclude_entries_by_topic(self, entries: list[dict], topic: str) -> list[dict]:
         """Exclude data source entries that belong to a specific topic."""
-        return [e for e in entries if topic not in e.get("topics", [])]
+        normalized = [self._normalize_entry_aliases(e) for e in entries if isinstance(e, dict)]
+        return [e for e in normalized if topic not in e.get("topics", [])]
 
     @capability(name="get_all_entry_topics")
     def get_all_entry_topics(self, entries: list[dict]) -> list[str]:
         """Return all unique topics across all entries."""
         topics: set[str] = set()
         for e in entries:
+            if not isinstance(e, dict):
+                continue
+            e = self._normalize_entry_aliases(e)
             topics.update(e.get("topics", []))
         return sorted(topics)
 
@@ -535,6 +597,9 @@ class DataUpdateCapabilities:
             )
 
         for e in entries:
+            if not isinstance(e, dict):
+                continue
+            e = self._normalize_entry_aliases(e)
             key = (tuple(sorted(e.get("topics", []))), e.get("dst_path", ""))
             if key not in by_key or quality(e) > quality(by_key[key]):
                 by_key[key] = e
@@ -543,13 +608,15 @@ class DataUpdateCapabilities:
     @capability(name="filter_entries_by_dst_path")
     def filter_entries_by_dst_path(self, entries: list[dict], path_prefix: str) -> list[dict]:
         """Filter entries whose dst_path starts with the given prefix."""
-        return [e for e in entries if e.get("dst_path", "").startswith(path_prefix)]
+        normalized = [self._normalize_entry_aliases(e) for e in entries if isinstance(e, dict)]
+        return [e for e in normalized if e.get("dst_path", "").startswith(path_prefix)]
 
     @capability(name="validate_entry_urls", description="Purpose: keep entries whose url starts with http:// or https://. Inputs: entries. Returns valid entries.")
     def validate_entry_urls(self, entries: list[dict]) -> list[dict]:
         """Return entries that have a non-empty url starting with http:// or https://."""
+        normalized = [self._normalize_entry_aliases(e) for e in entries if isinstance(e, dict)]
         return [
-            e for e in entries
+            e for e in normalized
             if e.get("url", "").startswith(("http://", "https://"))
         ]
 
@@ -563,7 +630,12 @@ class DataUpdateCapabilities:
             prompts we only have URLs + dst_path, so we default `data` to an
             empty JSON patch list (`[]`) when it's missing/None.
         """
-        for e in entries:
+        for index, entry in enumerate(entries):
+            if isinstance(entry, dict):
+                e = self._normalize_entry_aliases(entry)
+                entries[index] = e
+            else:
+                continue
             e["save_method"] = save_method
             # Ensure PATCH updates still satisfy the Pydantic schema validation.
             if save_method == "PATCH" and (e.get("data") is None):

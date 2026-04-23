@@ -135,6 +135,53 @@ def _policy_execution_mode(body: PolicyModuleCreate) -> str:
     return "goex" if (body.execution_mode or "direct").strip().lower() == "goex" else "direct"
 
 
+def _validate_policy_mutation_request(body: PolicyModuleCreate) -> tuple[str, str, bool]:
+    level = _policy_extension_level(body)
+    execution_mode = _policy_execution_mode(body)
+    extension_requested = _policy_extension_requested(body)
+
+    if level == "L4":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="L4 policy module mutations must use /symphony/code_extension",
+        )
+
+    if execution_mode == "goex":
+        if level not in {"L1", "L2", "L3"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GoEx policy module mutations require explicit extension_level L1, L2, or L3",
+            )
+        if not extension_requested:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GoEx policy module mutations require extension_code or task_description",
+            )
+
+    if extension_requested and level not in {"L1", "L2", "L3"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Policy module extension requests require explicit extension_level L1, L2, or L3",
+        )
+
+    return level, execution_mode, extension_requested
+
+
+def _policy_results_include_mutation(
+    results: list,
+    module_path: str,
+) -> bool:
+    """Return true when extension output already reports the requested mutation."""
+    for item in results or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("module_path") != module_path:
+            continue
+        if item.get("action") in {"created", "updated"}:
+            return True
+    return False
+
+
 def init_policy_crud_router(pubsub_endpoint=None):
     """Build and return the policy CRUD router.
 
@@ -226,6 +273,36 @@ result = hotfix_result
             trigger_condition=lambda res: _policy_extension_requested(body),
             default_mutates=True,
         )
+
+        if (
+            _policy_execution_mode(body) != "goex"
+            and _policy_extension_requested(body)
+            and outcome.ext_result.error is None
+            and not _policy_results_include_mutation(outcome.results, body.module_path)
+        ):
+            try:
+                mutation = upsert_policy_module(
+                    repo,
+                    body.module_path,
+                    body.rego_content,
+                    body.commit_message,
+                )
+            except Exception as exc:
+                raise _to_http_exception(exc) from exc
+            outcome.results = [
+                {
+                    "action": mutation["action"],
+                    "module_path": mutation["module_path"],
+                    "old_hash": mutation["old_hash"],
+                    "new_hash": mutation["new_hash"],
+                    "rego_content": body.rego_content,
+                    "previous_rego": context.get("current_rego"),
+                    "module_exists_before": bool(context.get("module_exists_before")),
+                    "repo_path": repo.working_dir,
+                    "package_name": package_name,
+                }
+            ]
+            context["direct_policy_mutation_applied"] = True
 
         response: dict = {
             "results": outcome.results,
@@ -320,19 +397,9 @@ result = hotfix_result
         Writes the file and commits it locally. The new module is immediately
         visible in subsequent GET /policy bundle fetches.
         """
-        level = _policy_extension_level(body)
-        if level == "L4":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="L4 policy module mutations must use /symphony/code_extension",
-            )
+        level, _, extension_requested = _validate_policy_mutation_request(body)
         if level in {"L1", "L2", "L3"}:
-            if _policy_execution_mode(body) == "goex" and not _policy_extension_requested(body):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="GoEx policy module mutations require extension_code or task_description",
-                )
-            if _policy_extension_requested(body):
+            if extension_requested:
                 return await _run_policy_module_extension(
                     body=body,
                     repo=repo,
@@ -443,19 +510,9 @@ result = hotfix_result
         Overwrites the file contents and commits the change locally. The update
         is immediately visible in subsequent GET /policy bundle fetches.
         """
-        level = _policy_extension_level(body)
-        if level == "L4":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="L4 policy module mutations must use /symphony/code_extension",
-            )
+        level, _, extension_requested = _validate_policy_mutation_request(body)
         if level in {"L1", "L2", "L3"}:
-            if _policy_execution_mode(body) == "goex" and not _policy_extension_requested(body):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="GoEx policy module mutations require extension_code or task_description",
-                )
-            if _policy_extension_requested(body):
+            if extension_requested:
                 return await _run_policy_module_extension(
                     body=body,
                     repo=repo,

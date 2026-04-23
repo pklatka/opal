@@ -133,56 +133,42 @@ HOTFIX_MODULE_PATH = DEFAULT_SCENARIO.module_path
 GOEX_SYSTEM_PROMPTS: dict[str, str] = {
     "L1": (
         "You are running an OPAL GoEx round-trip test at L1. "
-        "For each required mutation, use GoEx-enabled extension execution at this level with valid forward execution "
-        "logic and valid reversal logic. Do not rely on direct baseline execution. In OPAL, the reversible mutation "
-        "should use the existing `create_policy_module` or `update_policy_module` endpoint with `extension_level=\"L1\"`, extension_code, and goex "
-        "parameters rather than a read-only inspection step, a bundle post-processing extension, or a separate "
-        "hotfix endpoint. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed "
-        "for that endpoint; ordinary MCP/request tools are not available inside that extension code. Use the "
-        "extension capability metadata to choose the appropriate "
-        "helper calls. "
-        "The forward path should apply exactly the requested mutation, leave it applied, and return structured "
-        "identifiers and hotfix metadata for the created object, including the final Rego source as `rego_content`. "
-        "The reversal path should read the execution result, undo exactly what was created, and report its outcome."
+        "For each required mutation, use GoEx-enabled execution at this level with valid forward execution logic "
+        "and valid reversal logic. Do not rely on direct baseline execution. In OPAL, perform the reversible "
+        "mutation through `create_policy_module` or `update_policy_module` with GoEx enabled. When calling that "
+        "endpoint, include explicit `extension_level=\"L1\"` and `extension_code`. The forward path should apply "
+        "exactly the requested mutation, leave it applied, and return stable hotfix details for the changed module, "
+        "including `module_path`, `package_name`, `action`, and `rego_content`. The reversal path should read that "
+        "execution result, undo exactly what was created or updated, and report its outcome."
     ),
     "L2": (
         "You are running an OPAL GoEx round-trip test at L2. "
-        "For each required mutation, use GoEx-enabled execution at this level and request extension behavior "
-        "with reversal support. Do not rely on direct baseline execution. In OPAL, the reversible mutation should "
-        "use the existing `create_policy_module` or `update_policy_module` endpoint with `extension_level=\"L2\"`, task_description, and goex "
-        "parameters rather than a read-only inspection step, a bundle post-processing extension, or a separate "
-        "hotfix endpoint. Extension code for this hotfix should rely on the policy-hotfix capabilities exposed "
-        "for that endpoint; ordinary MCP/request tools are not available inside that "
-        "extension code. Use the extension capability metadata to choose the appropriate helper calls. Apply exactly the requested mutation "
-        "once per target object, return structured identifiers for created objects, and ensure the reversal path "
-        "can undo them from the execution result. Include the final Rego source as `rego_content` in that result."
+        "For each required mutation, use GoEx-enabled execution at this level and request extension behavior with "
+        "reversal support. Do not rely on direct baseline execution. In OPAL, perform the reversible mutation "
+        "through `create_policy_module` or `update_policy_module` with GoEx enabled. When calling that endpoint, "
+        "include explicit `extension_level=\"L2\"` and extension input (`task_description` or `extension_code`). "
+        "Apply exactly the requested mutation once per target module, return stable hotfix details for the changed "
+        "module, including `module_path`, `package_name`, `action`, and `rego_content`, and ensure the reversal "
+        "path can undo those changes from the execution result."
     ),
     "L3": (
         "You are running an OPAL GoEx round-trip test at L3. "
-        "For each required mutation, use GoEx-enabled extension execution at this level with source-aware reversible "
-        "behavior. In OPAL, the reversible mutation should use the source-aware existing "
-        "`create_policy_module` or `update_policy_module` endpoint with `extension_level=\"L3\"`, task_description, and goex parameters rather than a "
-        "read-only inspection step, a bundle post-processing extension, or a separate hotfix endpoint. Extension code "
-        "for this hotfix should rely on the policy-hotfix capabilities exposed for that endpoint; ordinary "
-        "MCP/request tools are not available inside that extension code. Use the extension capability metadata to "
-        "choose the appropriate helper calls. Apply exactly "
-        "one mutation per requested target object. Do not perform exploratory, duplicate, or debugging mutations. "
-        "Return structured identifiers for what was created so reversal can undo exactly those changes from the "
-        "execution result, including the final Rego source as `rego_content`."
+        "For each required mutation, use GoEx-enabled execution at this level with source-aware reversible behavior. "
+        "In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with "
+        "GoEx enabled. When calling that endpoint, include explicit `extension_level=\"L3\"` and `task_description`. "
+        "Apply exactly one mutation per requested target module. Do not perform exploratory, duplicate, or debugging "
+        "mutations. Return stable hotfix details for what was created or updated, including `module_path`, "
+        "`package_name`, `action`, and `rego_content`, so reversal can undo exactly those changes from the "
+        "execution result."
     ),
     "L4": (
         "You are running an OPAL GoEx round-trip test at L4. "
-        "Use GoEx-enabled reversible extension execution at this level. The forward path should perform only the "
-        "requested mutations, leave them applied, and assign the final structured payload to the expected "
-        "result variable. In OPAL, the reversible mutation should use the `code_extension` hotfix path rather "
-        "than a read-only inspection step, a bundle post-processing extension, or raw policy CRUD fallback. Extension code "
-        "for this hotfix should rely on the policy-hotfix capabilities exposed for that extension point; ordinary "
-        "MCP/request tools are not available inside that extension code. Use the extension capability metadata to "
-        "choose the appropriate helper calls. Do "
-        "not perform exploratory or debugging mutations. Consolidate your operations into a single code_extension "
-        "execution rather than making multiple multi-turn extension calls. The reversal path must undo every created object using "
-        "identifiers from the execution result. Ensure execution results expose stable identifiers for all created "
-        "objects, including the final Rego source as `rego_content`."
+        "Use GoEx-enabled reversible execution at this level. In OPAL, perform the reversible mutation through "
+        "`code_extension`. The forward path should perform only the requested mutation, leave it applied, and assign "
+        "the final structured payload to the expected result variable. Do not perform exploratory or debugging "
+        "mutations. Keep the hotfix in a single `code_extension` execution. The reversal path must undo the created "
+        "or updated module using the execution result. Ensure that result exposes stable hotfix details, including "
+        "`module_path`, `package_name`, `action`, and `rego_content`."
     ),
 }
 
@@ -313,6 +299,59 @@ def _fetch_hotfix_module(api_url: str, module_path: str = HOTFIX_MODULE_PATH) ->
         if module.get("path") == module_path:
             return module
     return None
+
+
+def _normalize_policy_state(payload: dict[str, Any]) -> dict[str, Any]:
+    def sorted_records(items: Any, fields: tuple[str, ...]) -> list[dict[str, str]]:
+        records: list[dict[str, str]] = []
+        if not isinstance(items, list):
+            return records
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            records.append({field: str(item.get(field, "") or "") for field in fields})
+        return sorted(records, key=lambda row: tuple(row[field] for field in fields))
+
+    return {
+        "policy_modules": sorted_records(
+            payload.get("policy_modules"),
+            ("path", "package_name", "rego"),
+        ),
+        "data_modules": sorted_records(payload.get("data_modules"), ("path", "data")),
+    }
+
+
+def _fetch_policy_state(api_url: str) -> dict[str, Any]:
+    resp = httpx.get(
+        f"{api_url.rstrip('/')}/policy",
+        headers=_auth_headers(),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return _normalize_policy_state(resp.json())
+
+
+def _policy_state_counts(state: dict[str, Any]) -> str:
+    return (
+        f"{len(state.get('policy_modules') or [])} policy module(s), "
+        f"{len(state.get('data_modules') or [])} data module(s)"
+    )
+
+
+def _wait_for_policy_state(
+    api_url: str,
+    expected: dict[str, Any],
+    *,
+    timeout_seconds: int = 120,
+) -> tuple[bool, dict[str, Any]]:
+    deadline = time.time() + timeout_seconds
+    last_state: dict[str, Any] = {}
+    while time.time() < deadline:
+        last_state = _fetch_policy_state(api_url)
+        if last_state == expected:
+            return True, last_state
+        time.sleep(3)
+    return False, last_state
 
 
 def _fetch_stack_info(api_url: str) -> dict[str, Any] | None:
@@ -642,6 +681,17 @@ def _build_capturing_callbacks(
 
     base["on_tool_result"] = on_tool_result
     return base
+
+
+def _ordered_unique_nonempty(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
 
 
 def _kubectl_base(kube_context: str | None) -> list[str]:
@@ -986,7 +1036,7 @@ def run_test(args: argparse.Namespace) -> bool:
     try:
         api_url = _resolve_api_url(args)
     except Exception as exc:
-        print(f"\n[1/5] Resolving API...")
+        print("\n[1/6] Snapshotting policy state before task...")
         print(f"  {FAIL}  {exc}")
         return False
 
@@ -1002,7 +1052,7 @@ def run_test(args: argparse.Namespace) -> bool:
     }
     model = args.model or default_models.get(args.provider, "haiku")
 
-    print("\n[1/5] OPAL API reachable...")
+    print("\n[1/6] Snapshotting policy state before task...")
     print(f"  API URL: {api_url}")
     try:
         httpx.get(f"{api_url}/healthcheck", timeout=5).raise_for_status()
@@ -1042,8 +1092,15 @@ def run_test(args: argparse.Namespace) -> bool:
     else:
         print("  [INFO] benchmark reset skipped by caller")
 
+    try:
+        state_before = _fetch_policy_state(api_url)
+    except Exception as exc:
+        print(f"  {FAIL}  Could not fetch /policy: {exc}")
+        return False
+    print(f"  {_policy_state_counts(state_before)} in policy state.")
+
     print(
-        f"\n[2/5] Running agent (case={args.case}, level={args.level}, execution_mode={args.execution_mode})..."
+        f"\n[2/6] Running agent (case={args.case}, level={args.level}, execution_mode={args.execution_mode})..."
     )
     print(f"  Task: {task[:200]}...\n" if len(task) > 200 else f"  Task: {task}\n")
 
@@ -1105,7 +1162,23 @@ def run_test(args: argparse.Namespace) -> bool:
         if codegen_client:
             codegen_client.stop()
 
-    print("\n[3/5] Checking policy hotfix outcome...")
+    print("\n[3/6] Checking server state changed after agent run...")
+    try:
+        state_after_run = _fetch_policy_state(api_url)
+    except Exception as exc:
+        print(f"  {FAIL}  Could not fetch /policy: {exc}")
+        return False
+    state_changed = state_after_run != state_before
+    if state_changed:
+        print(
+            f"  {PASS}  State changed ({_policy_state_counts(state_before)} -> "
+            f"{_policy_state_counts(state_after_run)})."
+        )
+    else:
+        print(f"  {FAIL}  Policy state identical to pre-task snapshot - expected a hotfix mutation.")
+        return False
+
+    print("  Checking policy hotfix outcome...")
     if not hotfix_snapshots:
         print(f"  {FAIL}  No policy hotfix tool results captured.")
         return False
@@ -1136,7 +1209,7 @@ def run_test(args: argparse.Namespace) -> bool:
                 print(f"  {FAIL}  client refresh failed: {exc}")
                 return False
             if scenario.decision_check is not None:
-                print(f"\n[3b/5] Checking decision on {scenario.decision_check.client_app}...")
+                print(f"\n[3b/6] Checking decision on {scenario.decision_check.client_app}...")
                 try:
                     propagated = _wait_for_client_decision(
                         args.namespace,
@@ -1161,7 +1234,7 @@ def run_test(args: argparse.Namespace) -> bool:
                     return False
                 print(f"  {PASS}  outage decision propagated to {scenario.decision_check.client_app}")
             elif scenario.expect_module_presence:
-                print("\n[3b/5] Checking hotfix on opal-client-authz-a...")
+                print("\n[3b/6] Checking hotfix on opal-client-authz-a...")
                 try:
                     propagated = _wait_for_client_hotfix(
                         args.namespace,
@@ -1178,10 +1251,26 @@ def run_test(args: argparse.Namespace) -> bool:
                     return False
                 print(f"  {PASS}  hotfix propagated to opal-client-authz-a")
 
+        phase1_check = {
+            "passed": True,
+            "state_changed": state_changed,
+            "reason": "state_change_propagated",
+            "effective_execution_mode": args.execution_mode,
+        }
+        print(f"  {PASS}  Phase 1 correctness: {phase1_check['reason']}")
+        print(f"  PHASE1_CHECK_JSON: {json.dumps(phase1_check, sort_keys=True)}")
+
         try:
             _reset_benchmark_state(api_url)
         except Exception as exc:
             print(f"  {FAIL}  direct-mode cleanup failed: {exc}")
+            return False
+        restored, state_after_cleanup = _wait_for_policy_state(api_url, state_before)
+        if not restored:
+            print(
+                f"  {FAIL}  direct-mode cleanup did not restore policy state "
+                f"({_policy_state_counts(state_after_cleanup)})."
+            )
             return False
         if args.namespace:
             try:
@@ -1221,22 +1310,49 @@ def run_test(args: argparse.Namespace) -> bool:
                     print(f"  {FAIL}  hotfix still visible on opal-client-authz-a after cleanup.")
                     return False
         print(f"  {PASS}  L0 baseline created the change and reset restored the repo.")
-        print("\n[4/5] Skipping GoEx (direct mode).")
-        print("\n[5/5] Skipping reversal (direct mode).")
+        print("\n[4/6] Skipping GoEx record/reversal checks in direct mode.")
+        print("\n[5/6] Skipping reversal (direct mode).")
+        print("\n[6/6] Comparing state after cleanup to state before task...")
+        print(f"  {PASS}  State is identical - round-trip complete.")
         return True
 
-    # Deduplicate and pick the last record (the model may retry on errors)
-    unique_ids = list(dict.fromkeys(record_ids))
-    if len(unique_ids) > 1:
-        print(f"  [INFO] Multiple GoEx records captured ({len(unique_ids)}); using the last one.")
-        record_ids[:] = [unique_ids[-1]]
-    elif len(unique_ids) == 0:
+    phase1_check = {
+        "passed": True,
+        "state_changed": state_changed,
+        "reason": "state_change_propagated",
+        "effective_execution_mode": args.execution_mode,
+    }
+    print(f"  {PASS}  Phase 1 correctness: {phase1_check['reason']}")
+    print(f"  PHASE1_CHECK_JSON: {json.dumps(phase1_check, sort_keys=True)}")
+
+    expected_record_ids = _ordered_unique_nonempty(
+        [
+            str(snapshot.get("goex_record_id") or "")
+            for snapshot in hotfix_snapshots
+            if snapshot.get("goex_record_id")
+        ]
+    )
+    if not expected_record_ids:
         print(f"  {FAIL}  No GoEx record captured.")
         return False
-    else:
-        record_ids[:] = unique_ids
+    record_ids[:] = _ordered_unique_nonempty(record_ids)
+    if len(record_ids) != len(expected_record_ids):
+        print(
+            f"  {FAIL}  Expected {len(expected_record_ids)} GoEx record(s) from successful "
+            f"mutation turn(s), but captured {len(record_ids)}."
+        )
+        return False
+    if record_ids != expected_record_ids:
+        print(
+            f"  {FAIL}  Captured GoEx record ids do not match successful mutation turn ids. "
+            f"expected={expected_record_ids}, captured={record_ids}"
+        )
+        return False
 
-    print(f"\n[4/5] Checking GoEx records ({len(record_ids)} captured)...")
+    print(
+        f"\n[4/6] Checking GoEx records ({len(record_ids)} captured, "
+        f"{len(expected_record_ids)} expected from successful GoEx mutation turn(s))..."
+    )
     fetched_records: list[dict[str, Any]] = []
     for rid in record_ids:
         try:
@@ -1296,7 +1412,7 @@ def run_test(args: argparse.Namespace) -> bool:
             print(f"  {FAIL}  client refresh failed: {exc}")
             return False
         if scenario.decision_check is not None:
-            print(f"\n[4b/5] Checking decision on {scenario.decision_check.client_app}...")
+            print(f"\n[4b/6] Checking decision on {scenario.decision_check.client_app}...")
             try:
                 propagated = _wait_for_client_decision(
                     args.namespace,
@@ -1322,7 +1438,7 @@ def run_test(args: argparse.Namespace) -> bool:
                 return False
             print(f"  {PASS}  outage decision propagated to {scenario.decision_check.client_app}")
         elif scenario.expect_module_presence:
-            print("\n[4b/5] Checking hotfix on opal-client-authz-a...")
+            print("\n[4b/6] Checking hotfix on opal-client-authz-a...")
             try:
                 propagated = _wait_for_client_hotfix(
                     args.namespace,
@@ -1339,8 +1455,8 @@ def run_test(args: argparse.Namespace) -> bool:
                 return False
             print(f"  {PASS}  hotfix propagated to opal-client-authz-a")
 
-    print(f"\n[5/5] Reversing {len(record_ids)} record(s)...")
-    for rid in record_ids:
+    print(f"\n[5/6] Reversing {len(record_ids)} record(s) in reverse creation order...")
+    for rid in reversed(record_ids):
         try:
             result = _reverse_record(api_url, rid)
             new_status = result.get("status", "?")
@@ -1351,6 +1467,15 @@ def run_test(args: argparse.Namespace) -> bool:
         except Exception as exc:
             print(f"  {FAIL}  reverse failed for {rid[:8]}…: {exc}")
             return False
+
+    print("\n[6/6] Comparing state after reversal to state before task...")
+    restored, state_after_reversal = _wait_for_policy_state(api_url, state_before)
+    if not restored:
+        print(
+            f"  {FAIL}  Policy state differs from pre-task snapshot after reversal "
+            f"({_policy_state_counts(state_after_reversal)})."
+        )
+        return False
 
     if not _wait_for_server_hotfix_state(
         api_url,
@@ -1403,7 +1528,7 @@ def run_test(args: argparse.Namespace) -> bool:
             if not cleared:
                 print(f"  {FAIL}  hotfix still visible on opal-client-authz-a after reversal.")
                 return False
-    print(f"  {PASS}  All reversals succeeded.")
+    print(f"  {PASS}  State is identical - round-trip complete.")
     return True
 
 
