@@ -706,7 +706,7 @@ async def update_policy_module(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(description=_get_desc("delete_policy_module", "Delete a Rego policy module."))
 async def delete_policy_module(
     module_path: str,
     commit_message: str = "Delete policy module",
@@ -718,7 +718,7 @@ async def delete_policy_module(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(description=_get_desc("list_policy_modules", "List Rego policy modules."))
 async def list_policy_modules() -> str:
     data = await _get("/policy/modules", headers=_client_headers())
     return json.dumps(data, indent=2)
