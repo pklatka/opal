@@ -33,6 +33,8 @@ def normalize_rego_content(rego_content: str) -> str:
 
 def validate_module_path(module_path: str, repo: Repo) -> Path:
     """Resolve *module_path* against the repo root, rejecting traversal."""
+    if "," in module_path:
+        raise PolicyModulePathError("module_path must not contain commas")
     normalized = PurePosixPath(module_path)
     if normalized.is_absolute():
         raise PolicyModulePathError("module_path must be relative")
@@ -44,6 +46,29 @@ def validate_module_path(module_path: str, repo: Repo) -> Path:
     if not str(normalized).endswith(".rego"):
         raise PolicyModulePathError("module_path must end with .rego")
     return resolved
+
+
+def delete_comma_named_rego_modules(repo: Repo, commit_message: str) -> dict:
+    """Delete legacy malformed Rego modules whose repo paths contain commas."""
+    tracked_paths = repo.git.ls_files("*.rego").splitlines()
+    bad_paths = sorted(path for path in tracked_paths if "," in path)
+    if not bad_paths:
+        head_hash = repo.head.commit.hexsha
+        return {
+            "action": "noop",
+            "module_paths": [],
+            "old_hash": head_hash,
+            "new_hash": head_hash,
+        }
+
+    repo.index.remove(bad_paths, working_tree=True)
+    old_hash, new_hash = commit_staged(repo, commit_message)
+    return {
+        "action": "deleted",
+        "module_paths": bad_paths,
+        "old_hash": old_hash,
+        "new_hash": new_hash,
+    }
 
 
 def commit_staged(repo: Repo, message: str) -> tuple[str, str]:

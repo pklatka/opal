@@ -48,6 +48,7 @@ from opal_server.symphony_ext import (
     post_benchmark_candidate_feed,
 )
 from opal_server.policy.module_ops import (
+    delete_comma_named_rego_modules,
     delete_policy_module as delete_policy_module_from_repo,
     upsert_policy_module as upsert_policy_module_in_repo,
 )
@@ -398,6 +399,10 @@ class OpalServer:
                         status_code=500,
                         detail="benchmark reset failed: tracked policy repo unavailable",
                     )
+                legacy_cleanup = delete_comma_named_rego_modules(
+                    repo,
+                    "Cleanup malformed comma-named benchmark modules during reset",
+                )
                 for module_path in benchmark_reset_delete_paths():
                     delete_policy_module_from_repo(
                         repo,
@@ -427,6 +432,7 @@ class OpalServer:
                 "paths_reset": [entry["dst_path"] for entry in benchmark_reset_entries()],
                 "policy_modules_restored": sorted(benchmark_reset_policy_modules()),
                 "policy_modules_removed": benchmark_reset_delete_paths(),
+                "legacy_policy_modules_removed": legacy_cleanup.get("module_paths", []),
             }
 
         @app.get(
