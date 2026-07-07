@@ -1,8 +1,8 @@
 """
-Symphony Extension Integration for OPAL Server
+CAGE Extension Integration for OPAL Server
 ================================================
 Defines capabilities, extension points, and registries that integrate
-Symphony's extension framework into the OPAL server.
+CAGE's extension framework into the OPAL server.
 
 Extension points:
   - post_policy_bundle: filter/transform policy bundles before serving
@@ -29,14 +29,14 @@ from git.repo import Repo
 from opal_common.logger import logger
 from opal_server.config import opal_server_config
 
-from symphony import (
+from cage import (
     ExtensionPoint,
     ExtensionRegistry,
-    GoExRegistry,
+    RXRRegistry,
     collect_capabilities,
     capability,
 )
-from symphony.sandbox import set_default_executor, PythonSandboxExecutor
+from cage.sandbox import set_default_executor, PythonSandboxExecutor
 from opal_server.policy.module_ops import (
     PolicyModulePathError,
     delete_policy_module as delete_policy_module_from_repo,
@@ -53,11 +53,11 @@ set_default_executor(PythonSandboxExecutor())
 
 def _create_codegen_provider():
     """Create an LLM provider for server-side code generation from env vars."""
-    provider_name = os.environ.get("SYMPHONY_CODEGEN_PROVIDER")
+    provider_name = os.environ.get("CAGE_CODEGEN_PROVIDER")
     if not provider_name:
         return None
-    model = os.environ.get("SYMPHONY_CODEGEN_MODEL")
-    from symphony.providers import create_provider
+    model = os.environ.get("CAGE_CODEGEN_MODEL")
+    from cage.providers import create_provider
     kwargs = {}
     if model:
         kwargs["model"] = model
@@ -800,16 +800,16 @@ _data_update_capabilities = list(collect_capabilities(data_update_caps))
 _statistics_capabilities = list(collect_capabilities(statistics_caps))
 
 # ---------------------------------------------------------------------------
-# Extension Registry & GoEx Registry
+# Extension Registry & RXR Registry
 # ---------------------------------------------------------------------------
 
 extension_registry = ExtensionRegistry()
 
-goex_registry = GoExRegistry(auto_approve=False, auto_approve_readonly=True)
+rxr_registry = RXRRegistry(auto_approve=False, auto_approve_readonly=True)
 
 
 def _validate_non_empty_bundle(record) -> bool:
-    """GoEx validator: reject if policy bundle has zero modules."""
+    """RXR validator: reject if policy bundle has zero modules."""
     metadata = record.metadata or {}
     endpoint = metadata.get("endpoint")
     if endpoint not in {"/policy", "/policy/"}:
@@ -823,7 +823,7 @@ def _validate_non_empty_bundle(record) -> bool:
     return True
 
 
-goex_registry.add_validator(_validate_non_empty_bundle)
+rxr_registry.add_validator(_validate_non_empty_bundle)
 
 # ---------------------------------------------------------------------------
 # Extension Points
@@ -856,7 +856,7 @@ policy_hotfix = extension_registry.register(
             "Policy hotfix extension: context contains repo_path, module_path, commit_message, incident policy modules, "
             "module_index, current_rego, and module_exists_before when available. Typical flow: read_policy_module or "
             "module_exists -> build the exact Rego source -> upsert_policy_module or delete_policy_module. Mutating "
-            "capabilities create GoEx records when execution_mode is goex; return module_path, package_name/action, "
+            "capabilities create RXR records when execution_mode is rxr; return module_path, package_name/action, "
             "rego_content, previous_rego, module_exists_before, and repo_path so reversal can undo exactly the change."
         ),
         trigger_description=(

@@ -5,8 +5,8 @@ This document mirrors the current OPAL benchmark harness in this repo.
 Primary sources:
 
 - Standard runner: [`scripts/run_opal_tests.sh`](../../scripts/run_opal_tests.sh)
-- GoEx runner: [`scripts/run_opal_goex_tests.sh`](../../scripts/run_opal_goex_tests.sh)
-- GoEx harness: [`examples/opal/agent_cli_goex.py`](agent_cli_goex.py)
+- RXR runner: [`scripts/run_opal_rxr_tests.sh`](../../scripts/run_opal_rxr_tests.sh)
+- RXR harness: [`examples/opal/agent_cli_rxr.py`](agent_cli_rxr.py)
 - Shared scenario metadata: [`examples/opal/packages/opal-server/opal_server/benchmark_scenarios.py`](packages/opal-server/opal_server/benchmark_scenarios.py)
 - Live verifier: [`scripts/opal/verify_live_state.py`](../../scripts/opal/verify_live_state.py)
 - Stats verifier: [`scripts/opal/opal_verify_run.py`](../../scripts/opal/opal_verify_run.py)
@@ -20,7 +20,7 @@ The benchmark assumes the Kubernetes-backed OPAL stack started by:
 
 ```bash
 ./scripts/start_opal.sh
-source /tmp/symphony-opal-symphony-opal.env
+source /tmp/cage-opal-cage-opal.env
 ```
 
 Important runtime assumptions:
@@ -29,11 +29,11 @@ Important runtime assumptions:
 - `OPAL_ADMIN_BASE_URL` points at the admin service and is used for benchmark reset/live verification when set.
 - `OPAL_NAMESPACE` is required for live state verification in the standard suite.
 - `OPAL_KUBE_CONTEXT` is optional but used when set.
-- `/symphony/benchmark/info` exposes stack drift/debug metadata and is logged by the standard runner when available.
+- `/cage/benchmark/info` exposes stack drift/debug metadata and is logged by the standard runner when available.
 
 ## Reset Contract
 
-`POST /symphony/benchmark/reset` is the benchmark baseline restore endpoint. It is called before every standard job when `OPAL_BENCHMARK_RESET=1`, and before every GoEx case.
+`POST /cage/benchmark/reset` is the benchmark baseline restore endpoint. It is called before every standard job when `OPAL_BENCHMARK_RESET=1`, and before every RXR case.
 
 Reset restores these data paths:
 
@@ -141,7 +141,7 @@ Keep any policy change narrowly scoped to the requested outage conditions.
 
 Level-specific extension additions:
 
-- `L1` to `L4`: `Use at least one relevant Symphony extension interaction while solving this task. A passing non-L0 run must show that extension interaction before the final state change.`
+- `L1` to `L4`: `Use at least one relevant CAGE extension interaction while solving this task. A passing non-L0 run must show that extension interaction before the final state change.`
 - `L4` only: `At L4, the only valid tool surface is code_extension. Perform all required data fetching, logic, and mutations inside a single comprehensive code_extension script.`
 
 Recent harness note:
@@ -234,7 +234,7 @@ Base the rollout decision and any published entries on the live benchmark data a
 
 Level-specific extension additions:
 
-- `L1` to `L4`: `Use at least one relevant Symphony extension interaction while solving this task. A passing non-L0 run must show that extension interaction before the final state change.`
+- `L1` to `L4`: `Use at least one relevant CAGE extension interaction while solving this task. A passing non-L0 run must show that extension interaction before the final state change.`
 - `L4` only: `At L4, the only valid tool surface is code_extension. Perform all required data fetching, logic, and mutations inside a single comprehensive code_extension script.`
 
 Recent harness note:
@@ -317,7 +317,7 @@ Keep any new policy narrowly scoped to the requested outage conditions and avoid
 
 Level-specific extension additions:
 
-- `L1` to `L4`: `Use at least one relevant Symphony extension interaction while solving this task. A passing non-L0 run must show that extension interaction before the final state change.`
+- `L1` to `L4`: `Use at least one relevant CAGE extension interaction while solving this task. A passing non-L0 run must show that extension interaction before the final state change.`
 - `L4` only: `At L4, the only valid tool surface is code_extension. Perform all required data fetching, logic, and mutations inside a single comprehensive code_extension script.`
 
 Recent harness note:
@@ -413,12 +413,12 @@ Current ranking key:
 2. `passing_total_tokens` ascending
 3. `passing_latency_ms` ascending
 
-## GoEx Suite
+## RXR Suite
 
 Shell entrypoint:
 
 ```bash
-./scripts/run_opal_goex_tests.sh --cases "test2 test1 test3" anthropic haiku
+./scripts/run_opal_rxr_tests.sh --cases "test2 test1 test3" anthropic haiku
 ```
 
 Current runner behavior:
@@ -426,7 +426,7 @@ Current runner behavior:
 - default levels: `L1 L2 L3 L4`
 - default cases: `test2 test1 test3`
 - `L0` runs `--execution-mode direct`
-- `L1` through `L4` run `--execution-mode goex`
+- `L1` through `L4` run `--execution-mode rxr`
 - each case calls benchmark reset before execution
 - preflight is `GET /healthcheck` on the resolved API URL
 - `OPAL_ADMIN_BASE_URL` or `--admin-base-url` overrides the control-plane API URL for reset/live verification, but MCP and codegen still derive from the public base URL unless explicitly overridden
@@ -435,70 +435,70 @@ Current runner behavior:
   - `phase2_passed`
   - `state_changed_ok`
   - `round_trip_ok`
-  - `goex_record_ids`
-  - `goex_reversed_ok_count`
-- full token usage for GoEx runs is stored in `logs/opal-goex/.../opal_goex.export.jsonl`, not in the harness `.stats.jsonl` rows
+  - `rxr_record_ids`
+  - `rxr_reversed_ok_count`
+- full token usage for RXR runs is stored in `logs/opal-rxr/.../opal_rxr.export.jsonl`, not in the harness `.stats.jsonl` rows
 
-### GoEx Model Flow
+### RXR Model Flow
 
-This is the model-facing flow for each `L1` through `L4` OPAL GoEx case.
+This is the model-facing flow for each `L1` through `L4` OPAL RXR case.
 
 1. The harness resets OPAL to the benchmark baseline and sends the selected system prompt plus one case task prompt to the model.
 2. Before the agent runs, the harness snapshots normalized OPAL `/policy` state. This includes policy modules and data modules normalized for order-insensitive comparison.
-3. At `L1` through `L3`, the reversible mutation is expected to go through `create_policy_module` or `update_policy_module` with GoEx enabled. At `L4`, the reversible mutation is expected to go through `code_extension`.
-4. The forward GoEx execution should apply only the requested policy mutation, leave it applied, and return stable hotfix details for the changed module, including `module_path`, `package_name`, `action`, and `rego_content`.
-5. The model's final assistant message is separate from the GoEx execution result. It must end with exactly one fenced JSON block containing a top-level `result` object for the benchmark grader.
-6. After the final answer, the harness verifies that the live OPAL policy state changed, verifies the expected authorization decision, checks GoEx record coverage, reverses all captured GoEx records in reverse creation order, and requires the final OPAL policy state to match the pre-task snapshot.
+3. At `L1` through `L3`, the reversible mutation is expected to go through `create_policy_module` or `update_policy_module` with RXR enabled. At `L4`, the reversible mutation is expected to go through `code_extension`.
+4. The forward RXR execution should apply only the requested policy mutation, leave it applied, and return stable hotfix details for the changed module, including `module_path`, `package_name`, `action`, and `rego_content`.
+5. The model's final assistant message is separate from the RXR execution result. It must end with exactly one fenced JSON block containing a top-level `result` object for the benchmark grader.
+6. After the final answer, the harness verifies that the live OPAL policy state changed, verifies the expected authorization decision, checks RXR record coverage, reverses all captured RXR records in reverse creation order, and requires the final OPAL policy state to match the pre-task snapshot.
 
 To see what the model actually did in a run:
 
-- Per-case transcript: `logs/opal-goex/<model>/<case>/<level>/opal_goex.log`
-- Combined transcript: `logs/opal-goex/<model>/opal_goex.log`
-- Raw exported run stats: `logs/opal-goex/<model>/<case>/<level>/opal_goex.export.jsonl`
-- Suite result rows: `stats/opal/goex/suite_<provider>_<model>.jsonl`
+- Per-case transcript: `logs/opal-rxr/<model>/<case>/<level>/opal_rxr.log`
+- Combined transcript: `logs/opal-rxr/<model>/opal_rxr.log`
+- Raw exported run stats: `logs/opal-rxr/<model>/<case>/<level>/opal_rxr.export.jsonl`
+- Suite result rows: `stats/opal/rxr/suite_<provider>_<model>.jsonl`
 
-In the transcript, look for `[Tool]` blocks to see each tool call, `[Sandbox Code]` blocks to see extension code, `[GoEx Mode]` blocks to see recorded GoEx IDs, and `[Reversal Code]` blocks to see reversal logic. The harness also prints the final verification and reversal outcome near the end of each case log.
+In the transcript, look for `[Tool]` blocks to see each tool call, `[Sandbox Code]` blocks to see extension code, `[RXR Mode]` blocks to see recorded RXR IDs, and `[Reversal Code]` blocks to see reversal logic. The harness also prints the final verification and reversal outcome near the end of each case log.
 
-### GoEx System Prompts
+### RXR System Prompts
 
-For each GoEx job, the model receives one system prompt from this section plus one task prompt from the selected GoEx case below. The prompts are intentionally benchmark-shaped and closer to the DeathStar GoEx prompts: the task describes the policy mutation and final JSON contract, while the system prompt describes the level-specific reversible-execution expectation.
+For each RXR job, the model receives one system prompt from this section plus one task prompt from the selected RXR case below. The prompts are intentionally benchmark-shaped and closer to the DeathStar RXR prompts: the task describes the policy mutation and final JSON contract, while the system prompt describes the level-specific reversible-execution expectation.
 
 `L0` direct baseline prompt:
 
 ```text
-You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any extension/goex variant of the policy module endpoints. Use list_policy_modules if needed to determine whether the hotfix module already exists. If it already exists, call update_policy_module; otherwise call create_policy_module. Use module_path and commit_message from the task, and provide rego_content that implements the requested outage policy change. Follow the task's grading contract exactly and end with exactly one fenced JSON block containing the requested top-level result object.
+You are running the OPAL RXR baseline at L0. Do not call code_extension and do not call any extension/rxr variant of the policy module endpoints. Use list_policy_modules if needed to determine whether the hotfix module already exists. If it already exists, call update_policy_module; otherwise call create_policy_module. Use module_path and commit_message from the task, and provide rego_content that implements the requested outage policy change. Follow the task's grading contract exactly and end with exactly one fenced JSON block containing the requested top-level result object.
 ```
 
 `L1` system prompt:
 
 ```text
-You are running an OPAL GoEx round-trip test at L1. For each required mutation, use GoEx-enabled execution at this level with valid forward execution logic and valid reversal logic. Do not rely on direct baseline execution. In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with GoEx enabled. The forward path should apply exactly the requested mutation, leave it applied, and return stable hotfix details for the changed module, including `module_path`, `package_name`, `action`, and `rego_content`. The reversal path should read that execution result, undo exactly what was created or updated, and report its outcome.
+You are running an OPAL RXR round-trip test at L1. For each required mutation, use RXR-enabled execution at this level with valid forward execution logic and valid reversal logic. Do not rely on direct baseline execution. In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with RXR enabled. The forward path should apply exactly the requested mutation, leave it applied, and return stable hotfix details for the changed module, including `module_path`, `package_name`, `action`, and `rego_content`. The reversal path should read that execution result, undo exactly what was created or updated, and report its outcome.
 ```
 
 `L2` system prompt:
 
 ```text
-You are running an OPAL GoEx round-trip test at L2. For each required mutation, use GoEx-enabled execution at this level and request extension behavior with reversal support. Do not rely on direct baseline execution. In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with GoEx enabled. Apply exactly the requested mutation once per target module, return stable hotfix details for the changed module, including `module_path`, `package_name`, `action`, and `rego_content`, and ensure the reversal path can undo those changes from the execution result.
+You are running an OPAL RXR round-trip test at L2. For each required mutation, use RXR-enabled execution at this level and request extension behavior with reversal support. Do not rely on direct baseline execution. In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with RXR enabled. Apply exactly the requested mutation once per target module, return stable hotfix details for the changed module, including `module_path`, `package_name`, `action`, and `rego_content`, and ensure the reversal path can undo those changes from the execution result.
 ```
 
 `L3` system prompt:
 
 ```text
-You are running an OPAL GoEx round-trip test at L3. For each required mutation, use GoEx-enabled execution at this level with source-aware reversible behavior. In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with GoEx enabled. Apply exactly one mutation per requested target module. Do not perform exploratory, duplicate, or debugging mutations. Return stable hotfix details for what was created or updated, including `module_path`, `package_name`, `action`, and `rego_content`, so reversal can undo exactly those changes from the execution result.
+You are running an OPAL RXR round-trip test at L3. For each required mutation, use RXR-enabled execution at this level with source-aware reversible behavior. In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with RXR enabled. Apply exactly one mutation per requested target module. Do not perform exploratory, duplicate, or debugging mutations. Return stable hotfix details for what was created or updated, including `module_path`, `package_name`, `action`, and `rego_content`, so reversal can undo exactly those changes from the execution result.
 ```
 
 `L4` system prompt:
 
 ```text
-You are running an OPAL GoEx round-trip test at L4. Use GoEx-enabled reversible execution at this level. In OPAL, perform the reversible mutation through `code_extension`. The forward path should perform only the requested mutation, leave it applied, and assign the final structured payload to the expected result variable. Do not perform exploratory or debugging mutations. Keep the hotfix in a single `code_extension` execution. The reversal path must undo the created or updated module using the execution result. Ensure that result exposes stable hotfix details, including `module_path`, `package_name`, `action`, and `rego_content`.
+You are running an OPAL RXR round-trip test at L4. Use RXR-enabled reversible execution at this level. In OPAL, perform the reversible mutation through `code_extension`. The forward path should perform only the requested mutation, leave it applied, and assign the final structured payload to the expected result variable. Do not perform exploratory or debugging mutations. Keep the hotfix in a single `code_extension` execution. The reversal path must undo the created or updated module using the execution result. Ensure that result exposes stable hotfix details, including `module_path`, `package_name`, `action`, and `rego_content`.
 ```
 
-### GoEx Case: `test2`
+### RXR Case: `test2`
 
 Task prompt:
 
 ```text
-A sev-1 outage in the production payments cluster forced traffic onto a stale cache replica. Apply an emergency OPAL policy hotfix so the on-call responders can run the cache failover operation while the incident is active. Perform the requested mutation in GoEx mode so it can be reversed after execution.
+A sev-1 outage in the production payments cluster forced traffic onto a stale cache replica. Apply an emergency OPAL policy hotfix so the on-call responders can run the cache failover operation while the incident is active. Perform the requested mutation in RXR mode so it can be reversed after execution.
 
 Requirements:
 - Use module_path "incident/cache_failover_hotfix.rego".
@@ -518,19 +518,19 @@ For automated grading, end your reply with exactly one Markdown fenced JSON bloc
 
 Verification contract:
 
-- one or more GoEx records may be created in GoEx mode, but every successful mutation record must be captured and reversed
+- one or more RXR records may be created in RXR mode, but every successful mutation record must be captured and reversed
 - hotfix snapshot must resolve to `incident/cache_failover_hotfix.rego`
 - normalized OPAL `/policy` state must differ from the pre-task snapshot after the forward mutation
 - decision on `app/incident/cache_failover_hotfix/allow` must become `true`
 - negative control must remain `false`
 - reversal must clear the hotfix and restore normalized OPAL `/policy` state to the pre-task snapshot
 
-### GoEx Case: `test1`
+### RXR Case: `test1`
 
 Task prompt:
 
 ```text
-A sev-1 outage in the production payments cluster is still unresolved because the active authorization gate module at "incident/payments_outage_gate.rego" is too restrictive. Update that module so on-call responders can perform the cache failover action, but only under the intended sev-1 break-glass conditions. Perform the requested mutation in GoEx mode so it can be reversed after execution.
+A sev-1 outage in the production payments cluster is still unresolved because the active authorization gate module at "incident/payments_outage_gate.rego" is too restrictive. Update that module so on-call responders can perform the cache failover action, but only under the intended sev-1 break-glass conditions. Perform the requested mutation in RXR mode so it can be reversed after execution.
 
 Requirements:
 - Use module_path "incident/payments_outage_gate.rego".
@@ -551,18 +551,18 @@ For automated grading, end your reply with exactly one Markdown fenced JSON bloc
 
 Verification contract:
 
-- one or more GoEx records may be created in GoEx mode, but every successful mutation record must be captured and reversed
+- one or more RXR records may be created in RXR mode, but every successful mutation record must be captured and reversed
 - normalized OPAL `/policy` state must differ from the pre-task snapshot after the forward mutation
 - decision on `app/incident/payments_outage_gate/allow` must become `true`
 - negative control must remain `false`
 - reversal must restore the restrictive baseline module and the full normalized OPAL `/policy` snapshot
 
-### GoEx Case: `test3`
+### RXR Case: `test3`
 
 Task prompt:
 
 ```text
-A sev-1 outage in the production payments cluster now requires a recovery action that no existing production policy covers: allowing on-call responders to run the replica promotion operation. Create a new emergency OPAL policy hotfix. Perform the requested mutation in GoEx mode so it can be reversed after execution.
+A sev-1 outage in the production payments cluster now requires a recovery action that no existing production policy covers: allowing on-call responders to run the replica promotion operation. Create a new emergency OPAL policy hotfix. Perform the requested mutation in RXR mode so it can be reversed after execution.
 
 Requirements:
 - Use module_path "incident/payments_replica_promote_hotfix.rego".
@@ -582,7 +582,7 @@ For automated grading, end your reply with exactly one Markdown fenced JSON bloc
 
 Verification contract:
 
-- one or more GoEx records may be created in GoEx mode, but every successful mutation record must be captured and reversed
+- one or more RXR records may be created in RXR mode, but every successful mutation record must be captured and reversed
 - normalized OPAL `/policy` state must differ from the pre-task snapshot after the forward mutation
 - decision on `app/incident/payments_replica_promote_hotfix/allow` must become `true`
 - negative control must remain `false`
@@ -596,10 +596,10 @@ Current focused tests:
 uv run python -m unittest \
   tests.test_opal_benchmark_token_paths \
   tests.test_opal_standard_harness \
-  tests.test_opal_goex_harness \
+  tests.test_opal_rxr_harness \
   tests.test_opal_verify_run \
   tests.test_runner_tool_projection \
-  tests.test_symphony_code_extension \
+  tests.test_cage_code_extension \
   tests.test_opal_server_normalization
 ```
 
@@ -613,10 +613,10 @@ What those tests cover:
 - `tests/test_opal_standard_harness.py`
   - client policy refresh is triggered before live verification
   - failure diagnostics include server module state, client policy status, and client health
-- `tests/test_opal_goex_harness.py`
-  - nested GoEx hotfix results are flattened correctly
-  - GoEx record IDs are extracted from export logs and text logs
-  - multiple GoEx record IDs are preserved in creation order
+- `tests/test_opal_rxr_harness.py`
+  - nested RXR hotfix results are flattened correctly
+  - RXR record IDs are extracted from export logs and text logs
+  - multiple RXR record IDs are preserved in creation order
   - benchmark non-empty-bundle validation skips code-extension records
   - normalized OPAL policy-state comparisons ignore ordering and commit-hash noise
 - `tests/test_opal_verify_run.py`
@@ -626,7 +626,7 @@ What those tests cover:
 - `tests/test_runner_tool_projection.py`
   - `L4` exposes only `code_extension`
   - generated code-like arguments are HTML-entity decoded before execution
-- `tests/test_symphony_code_extension.py`
+- `tests/test_cage_code_extension.py`
   - L4 `code_extension` accepts explicit code and decodes HTML entities
   - generic extension-point execution decodes HTML entities for non-L4 `extension_code` paths
 - `tests/test_opal_server_normalization.py`

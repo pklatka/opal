@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from git.repo import Repo
 from opal_common.logger import logger
 from pydantic import BaseModel, Field
-from symphony import handle_extension, tool
+from cage import handle_extension, tool
 
 from opal_server.policy.bundles.api import get_repo
 from opal_server.policy.module_ops import (
@@ -23,9 +23,9 @@ from opal_server.policy.module_ops import (
     module_exists as policy_module_exists,
     upsert_policy_module,
 )
-from opal_server.symphony_ext import (
+from opal_server.cage_ext import (
     _policy_hotfix_capabilities,
-    goex_registry,
+    rxr_registry,
     policy_hotfix,
 )
 
@@ -48,11 +48,11 @@ class PolicyModuleCreate(BaseModel):
     )
     package_name: str | None = Field(
         None,
-        description="Expected package name for extension/goex hotfix result metadata.",
+        description="Expected package name for extension/rxr hotfix result metadata.",
     )
     extension_level: str = Field(
         "L0",
-        description="Symphony extension level for this existing policy-module endpoint.",
+        description="CAGE extension level for this existing policy-module endpoint.",
     )
     extension_code: str | None = Field(
         None,
@@ -64,11 +64,11 @@ class PolicyModuleCreate(BaseModel):
     )
     execution_mode: str = Field(
         "direct",
-        description="Execution mode: direct or goex.",
+        description="Execution mode: direct or rxr.",
     )
     reversal_code: str | None = Field(
         None,
-        description="Undo code for GoEx mode.",
+        description="Undo code for RXR mode.",
     )
 
 
@@ -132,7 +132,7 @@ def _policy_extension_requested(body: PolicyModuleCreate) -> bool:
 
 
 def _policy_execution_mode(body: PolicyModuleCreate) -> str:
-    return "goex" if (body.execution_mode or "direct").strip().lower() == "goex" else "direct"
+    return "rxr" if (body.execution_mode or "direct").strip().lower() == "rxr" else "direct"
 
 
 def _validate_policy_mutation_request(body: PolicyModuleCreate) -> tuple[str, str, bool]:
@@ -143,19 +143,19 @@ def _validate_policy_mutation_request(body: PolicyModuleCreate) -> tuple[str, st
     if level == "L4":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="L4 policy module mutations must use /symphony/code_extension",
+            detail="L4 policy module mutations must use /cage/code_extension",
         )
 
-    if execution_mode == "goex":
+    if execution_mode == "rxr":
         if level not in {"L1", "L2", "L3"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="GoEx policy module mutations require explicit extension_level L1, L2, or L3",
+                detail="RXR policy module mutations require explicit extension_level L1, L2, or L3",
             )
         if not extension_requested:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="GoEx policy module mutations require extension_code or task_description",
+                detail="RXR policy module mutations require extension_code or task_description",
             )
 
     if extension_requested and level not in {"L1", "L2", "L3"}:
@@ -274,7 +274,7 @@ result = hotfix_result
             },
             context=context,
             all_capabilities=_policy_hotfix_capabilities,
-            goex_registry=goex_registry,
+            rxr_registry=rxr_registry,
             original_call=original_call,
             default_source=default_source,
             endpoint_path=endpoint_path,
@@ -283,7 +283,7 @@ result = hotfix_result
         )
 
         if (
-            _policy_execution_mode(body) != "goex"
+            _policy_execution_mode(body) != "rxr"
             and _policy_extension_requested(body)
             and outcome.ext_result.error is None
             and not _policy_results_include_mutation(outcome.results, body.module_path)
@@ -323,10 +323,10 @@ result = hotfix_result
             response["extension_error"] = outcome.ext_result.error
         if outcome.extension_context:
             response["extension_context"] = outcome.extension_context
-        if outcome.ext_result.goex_record_id:
-            response["goex_record_id"] = outcome.ext_result.goex_record_id
-            response["goex_mode"] = _policy_execution_mode(body) == "goex"
-            response["goex_reversal_code"] = outcome.ext_result.goex_reversal_code
+        if outcome.ext_result.rxr_record_id:
+            response["rxr_record_id"] = outcome.ext_result.rxr_record_id
+            response["rxr_mode"] = _policy_execution_mode(body) == "rxr"
+            response["rxr_reversal_code"] = outcome.ext_result.rxr_reversal_code
 
         await _notify_policy_change()
         return JSONResponse(response)
@@ -375,20 +375,20 @@ result = hotfix_result
         level_overrides={
             "L1": {
                 "description": (
-                    "Create a policy module through this original endpoint. For L1 extension/goex runs, "
+                    "Create a policy module through this original endpoint. For L1 extension/rxr runs, "
                     "provide extension_code that uses policy-hotfix sandbox capabilities such as "
                     "upsert_policy_module and read_policy_module."
                 ),
             },
             "L2": {
                 "description": (
-                    "Create a policy module through this original endpoint. For L2 extension/goex runs, "
+                    "Create a policy module through this original endpoint. For L2 extension/rxr runs, "
                     "provide task_description so server-side codegen can use the policy-hotfix sandbox."
                 ),
             },
             "L3": {
                 "description": (
-                    "Create a policy module through this original endpoint with source-aware extension/goex "
+                    "Create a policy module through this original endpoint with source-aware extension/rxr "
                     "behavior. Provide task_description; the code generator sees this endpoint source and "
                     "policy-hotfix capabilities."
                 ),
@@ -488,20 +488,20 @@ result = hotfix_result
         level_overrides={
             "L1": {
                 "description": (
-                    "Update a policy module through this original endpoint. For L1 extension/goex runs, "
+                    "Update a policy module through this original endpoint. For L1 extension/rxr runs, "
                     "provide extension_code that uses policy-hotfix sandbox capabilities such as "
                     "upsert_policy_module and read_policy_module."
                 ),
             },
             "L2": {
                 "description": (
-                    "Update a policy module through this original endpoint. For L2 extension/goex runs, "
+                    "Update a policy module through this original endpoint. For L2 extension/rxr runs, "
                     "provide task_description so server-side codegen can use the policy-hotfix sandbox."
                 ),
             },
             "L3": {
                 "description": (
-                    "Update a policy module through this original endpoint with source-aware extension/goex "
+                    "Update a policy module through this original endpoint with source-aware extension/rxr "
                     "behavior. Provide task_description; the code generator sees this endpoint source and "
                     "policy-hotfix capabilities."
                 ),

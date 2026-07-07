@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-OPAL Symphony Agent CLI
+OPAL CAGE Agent CLI
 ========================
-Interactive agent that uses LLM + MCP to test the Symphony extension levels
+Interactive agent that uses LLM + MCP to test the CAGE extension levels
 against the OPAL server API.
 
 Prerequisites:
@@ -26,13 +26,13 @@ import os
 import sys
 from pathlib import Path
 
-from symphony import SymphonyRunner
-from symphony.stats_export import make_export_callbacks
+from cage import CAGERunner
+from cage.stats_export import make_export_callbacks
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="OPAL Symphony Agent CLI - test L0/L1/L2/L3/L4 extensions",
+        description="OPAL CAGE Agent CLI - test L0/L1/L2/L3/L4 extensions",
     )
     parser.add_argument(
         "--level",
@@ -110,7 +110,7 @@ def main() -> None:
     os.environ["OPAL_API_URL"] = args.api_url
 
     mcp_server = str(Path(__file__).parent / "mcp_server.py")
-    runner = SymphonyRunner(
+    runner = CAGERunner(
         model=model,
         reasoning=reasoning,
         provider=args.provider,
@@ -138,13 +138,13 @@ def main() -> None:
             )
             asyncio.run(runner.run(task, level=args.level, **cb))
         else:
-            cb = SymphonyRunner.terminal_callbacks()
+            cb = CAGERunner.terminal_callbacks()
             asyncio.run(runner.run(task, level=args.level, **cb))
 
     if args.task:
         _run_task(args.task)
     else:
-        print(f"OPAL Symphony Agent CLI ({args.level})")
+        print(f"OPAL CAGE Agent CLI ({args.level})")
         print(f"Provider: {args.provider} | Model: {model} | Reasoning: {'on' if reasoning else 'off'}")
         print("Type 'quit' to exit.\n")
 

@@ -21,7 +21,7 @@ from pydantic import Field as PydanticField
 
 
 class DataUpdateWithExtension(DataUpdate):
-    """DataUpdate extended with Symphony extension fields.
+    """DataUpdate extended with CAGE extension fields.
 
     All extension fields are optional with safe defaults so existing
     callers that send a plain DataUpdate body continue to work unchanged.
@@ -29,7 +29,7 @@ class DataUpdateWithExtension(DataUpdate):
 
     extension_level: str = PydanticField(
         default="L0",
-        description="Symphony extension level (L0-L3)",
+        description="CAGE extension level (L0-L3)",
     )
     extension_code: Optional[str] = PydanticField(
         default=None,
@@ -41,22 +41,22 @@ class DataUpdateWithExtension(DataUpdate):
     )
     execution_mode: str = PydanticField(
         default="direct",
-        description="Execution mode: direct or goex",
+        description="Execution mode: direct or rxr",
     )
     reversal_code: Optional[str] = PydanticField(
         default=None,
-        description="Undo code for GoEx mode",
+        description="Undo code for RXR mode",
     )
 from opal_common.schemas.security import PeerType
 from opal_common.urls import set_url_query_param
 from opal_server.config import opal_server_config
 from opal_server.data.data_update_publisher import DataUpdatePublisher
-from symphony import tool, handle_extension
+from cage import tool, handle_extension
 
-from opal_server.symphony_ext import (
+from opal_server.cage_ext import (
     post_data_update,
     _data_update_capabilities,
-    goex_registry,
+    rxr_registry,
 )
 
 
@@ -272,7 +272,7 @@ def init_data_updates_router(
             default_fn=lambda: entries_data,
             context=context,
             all_capabilities=_data_update_capabilities,
-            goex_registry=goex_registry,
+            rxr_registry=rxr_registry,
             original_call='result = context["entries"]',
             default_source=_default_publish_data_update,
             endpoint_path="/data/config",
@@ -321,10 +321,10 @@ def init_data_updates_router(
             response["endpoint_source"] = ext.endpoint_source
             response["extension_results"] = outcome.results
             response["entries_published"] = len(update.entries)
-        if ext.goex_record_id:
-            response["goex_record_id"] = ext.goex_record_id
-            response["goex_mode"] = execution_mode == "goex"
-            response["goex_reversal_code"] = ext.goex_reversal_code
+        if ext.rxr_record_id:
+            response["rxr_record_id"] = ext.rxr_record_id
+            response["rxr_mode"] = execution_mode == "rxr"
+            response["rxr_reversal_code"] = ext.rxr_reversal_code
         return response
 
     return router

@@ -15,13 +15,13 @@ from opal_common.logger import logger
 from opal_common.schemas.policy import PolicyBundle
 from opal_server.config import opal_server_config
 from starlette.responses import RedirectResponse
-from symphony import tool, handle_extension
-from symphony.models import SymphonyExtensionBody
+from cage import tool, handle_extension
+from cage.models import CAGEExtensionBody
 
-from opal_server.symphony_ext import (
+from opal_server.cage_ext import (
     post_policy_bundle,
     _policy_capabilities,
-    goex_registry,
+    rxr_registry,
 )
 
 router = APIRouter()
@@ -149,7 +149,7 @@ def _normalize_bundle_package_names(bundle: PolicyBundle) -> PolicyBundle:
 def _use_benchmark_exact_path_fast_path(
     input_paths: List[Path],
     base_hash: Optional[str],
-    ext: SymphonyExtensionBody,
+    ext: CAGEExtensionBody,
 ) -> bool:
     if not _env_flag("OPAL_BENCHMARK_MODE", False):
         return False
@@ -243,9 +243,9 @@ async def get_policy(
         None,
         description="hash of previous bundle already downloaded, server will return a diff bundle.",
     ),
-    ext: Optional[SymphonyExtensionBody] = Body(None),
+    ext: Optional[CAGEExtensionBody] = Body(None),
 ):
-    """Serve policy bundles with optional Symphony extension support.
+    """Serve policy bundles with optional CAGE extension support.
 
     Extension levels:
     - **L0**: Serve full or differential policy bundle from Git repo
@@ -257,7 +257,7 @@ async def get_policy(
     execution_mode, reversal_code) are accepted as a JSON request body to
     avoid URL length limits on large extension_code payloads.
     """
-    ext = ext or SymphonyExtensionBody()
+    ext = ext or CAGEExtensionBody()
     extension_level = ext.extension_level
     extension_code = ext.extension_code
     task_description = ext.task_description
@@ -279,7 +279,7 @@ async def get_policy(
         default_fn=lambda: context["policy_modules"],
         context=context,
         all_capabilities=_policy_capabilities,
-        goex_registry=goex_registry,
+        rxr_registry=rxr_registry,
         original_call='result = context["policy_modules"]',
         default_source=_default_get_policy,
         endpoint_path="/policy",
@@ -304,9 +304,9 @@ async def get_policy(
     bundle_dict["extension_triggered"] = ext.triggered
     bundle_dict["generated_code"] = ext.generated_code
     bundle_dict["endpoint_source"] = ext.endpoint_source
-    bundle_dict["goex_record_id"] = ext.goex_record_id
-    bundle_dict["goex_mode"] = execution_mode == "goex"
-    bundle_dict["goex_reversal_code"] = ext.goex_reversal_code
+    bundle_dict["rxr_record_id"] = ext.rxr_record_id
+    bundle_dict["rxr_mode"] = execution_mode == "rxr"
+    bundle_dict["rxr_reversal_code"] = ext.rxr_reversal_code
     bundle_dict["needs_extension"] = outcome.needs_extension
     if outcome.extension_context:
         bundle_dict["extension_context"] = outcome.extension_context

@@ -41,10 +41,10 @@ from opal_server.scopes.scope_repository import ScopeRepository
 from opal_server.security.api import init_security_router
 from opal_server.security.jwks import JwksStaticEndpoint
 from opal_server.statistics import OpalStatistics, init_statistics_router
-from opal_server.symphony_ext import (
+from opal_server.cage_ext import (
     _data_update_capabilities,
-    extension_registry as symphony_registry,
-    goex_registry as symphony_goex_registry,
+    extension_registry as cage_registry,
+    rxr_registry as cage_rxr_registry,
     post_benchmark_candidate_feed,
 )
 from opal_server.policy.module_ops import (
@@ -58,22 +58,22 @@ from opal_server.benchmark_scenarios import (
     benchmark_reset_entries,
     benchmark_reset_policy_modules,
 )
-from symphony import SYSTEM_PROMPTS as symphony_prompts, mount_symphony
+from cage import SYSTEM_PROMPTS as cage_prompts, mount_cage
 
 
 def _create_codegen_provider():
     """Create an LLM provider for server-side code generation.
 
-    Reads ``SYMPHONY_CODEGEN_PROVIDER`` and ``SYMPHONY_CODEGEN_MODEL`` from
+    Reads ``CAGE_CODEGEN_PROVIDER`` and ``CAGE_CODEGEN_MODEL`` from
     the environment.  Returns ``None`` if no provider is configured, which
     causes the server to fall back to ``needs_extension`` (client-side
     generation).
     """
-    provider_name = os.environ.get("SYMPHONY_CODEGEN_PROVIDER")
+    provider_name = os.environ.get("CAGE_CODEGEN_PROVIDER")
     if not provider_name:
         return None
-    model = os.environ.get("SYMPHONY_CODEGEN_MODEL")
-    from symphony.providers import create_provider
+    model = os.environ.get("CAGE_CODEGEN_MODEL")
+    from cage.providers import create_provider
     kwargs = {}
     if model:
         kwargs["model"] = model
@@ -267,14 +267,14 @@ class OpalServer:
         # worker for L2/L3/L4 server-side extensions.  The route MUST be registered
         # before any HTTP routes or middleware because Starlette matches routes in
         # registration order — if an HTTP route is registered first, Starlette will
-        # match it for the /symphony/codegen/ws path and reject the WebSocket
-        # upgrade with a 403.  mount_symphony() also registers this route, but it
+        # match it for the /cage/codegen/ws path and reject the WebSocket
+        # upgrade with a 403.  mount_cage() also registers this route, but it
         # runs after all HTTP endpoints are defined, which is too late.
         from fastapi import WebSocket as _WebSocket
 
-        @app.websocket("/symphony/codegen/ws")
-        async def symphony_codegen_worker(websocket: _WebSocket):
-            from symphony.providers.websocket_codegen import get_codegen_broker
+        @app.websocket("/cage/codegen/ws")
+        async def cage_codegen_worker(websocket: _WebSocket):
+            from cage.providers.websocket_codegen import get_codegen_broker
             broker = get_codegen_broker()
             await broker.register_fastapi_worker(websocket)
 
@@ -361,10 +361,10 @@ class OpalServer:
             self.jwks_endpoint.configure_app(app)
 
         # top level routes (i.e: healthchecks)
-        from symphony import handle_extension, tool as symphony_tool
-        from symphony.models import SymphonyExtensionBody
+        from cage import handle_extension, tool as cage_tool
+        from cage.models import CAGEExtensionBody
 
-        @symphony_tool(name="healthcheck", method="GET", path="/healthcheck")
+        @cage_tool(name="healthcheck", method="GET", path="/healthcheck")
         @app.get("/healthcheck", include_in_schema=False)
         def healthcheck():
             """Check if the OPAL server is healthy and responding."""
@@ -375,8 +375,8 @@ class OpalServer:
             return {"status": "ok"}
 
         @app.post(
-            "/symphony/benchmark/reset",
-            tags=["Symphony"],
+            "/cage/benchmark/reset",
+            tags=["CAGE"],
             dependencies=[Depends(authenticator)],
         )
         async def benchmark_reset():
@@ -436,8 +436,8 @@ class OpalServer:
             }
 
         @app.get(
-            "/symphony/benchmark/info",
-            tags=["Symphony"],
+            "/cage/benchmark/info",
+            tags=["CAGE"],
             dependencies=[Depends(authenticator)],
         )
         async def benchmark_info():
@@ -448,16 +448,16 @@ class OpalServer:
                 "policy_repo_branch": os.environ.get("OPAL_POLICY_REPO_MAIN_BRANCH", ""),
                 "policy_repo_manifest_path": opal_server_config.POLICY_REPO_MANIFEST_PATH,
                 "policy_webhook_topic": opal_server_config.POLICY_REPO_WEBHOOK_TOPIC,
-                "codegen_provider": os.environ.get("SYMPHONY_CODEGEN_PROVIDER", ""),
-                "codegen_model": os.environ.get("SYMPHONY_CODEGEN_MODEL", ""),
-                "build_id": os.environ.get("SYMPHONY_BUILD_ID", ""),
+                "codegen_provider": os.environ.get("CAGE_CODEGEN_PROVIDER", ""),
+                "codegen_model": os.environ.get("CAGE_CODEGEN_MODEL", ""),
+                "build_id": os.environ.get("CAGE_BUILD_ID", ""),
                 "git_sha": os.environ.get("GIT_SHA", ""),
             }
 
-        @symphony_tool(
+        @cage_tool(
             name="get_benchmark_data_candidates",
             method="GET",
-            path="/symphony/benchmark/data-candidates",
+            path="/cage/benchmark/data-candidates",
             levels=["L0", "L1", "L2", "L3"],
             level_params={
                 "L0": ["label"],
@@ -490,16 +490,16 @@ class OpalServer:
             },
         )
         @app.get(
-            "/symphony/benchmark/data-candidates",
-            tags=["Symphony"],
+            "/cage/benchmark/data-candidates",
+            tags=["CAGE"],
             dependencies=[Depends(authenticator)],
         )
         async def benchmark_data_candidates_feed(
             label: str,
-            ext: SymphonyExtensionBody | None = Body(None),
+            ext: CAGEExtensionBody | None = Body(None),
         ):
-            """Return benchmark candidate data-update entries with optional Symphony filtering."""
-            ext = ext or SymphonyExtensionBody()
+            """Return benchmark candidate data-update entries with optional CAGE filtering."""
+            ext = ext or CAGEExtensionBody()
             candidates = _default_benchmark_candidates(label)
             if not candidates:
                 raise HTTPException(
@@ -521,10 +521,10 @@ class OpalServer:
                 default_fn=lambda: candidates,
                 context=candidate_context,
                 all_capabilities=_data_update_capabilities,
-                goex_registry=symphony_goex_registry,
+                rxr_registry=cage_rxr_registry,
                 original_call='result = context["candidates"]',
                 default_source=_default_benchmark_candidates,
-                endpoint_path="/symphony/benchmark/data-candidates",
+                endpoint_path="/cage/benchmark/data-candidates",
                 trigger_condition=lambda res: bool(ext.extension_code) or bool(ext.task_description),
             )
 
@@ -547,14 +547,14 @@ class OpalServer:
                 response["extension_triggered"] = True
                 response["generated_code"] = ext_result.generated_code
                 response["endpoint_source"] = ext_result.endpoint_source
-            if ext_result.goex_record_id:
-                response["goex_record_id"] = ext_result.goex_record_id
-                response["goex_mode"] = ext.execution_mode == "goex"
-                response["goex_reversal_code"] = ext_result.goex_reversal_code
+            if ext_result.rxr_record_id:
+                response["rxr_record_id"] = ext_result.rxr_record_id
+                response["rxr_mode"] = ext.execution_mode == "rxr"
+                response["rxr_reversal_code"] = ext_result.rxr_reversal_code
             return JSONResponse(response)
 
-        # Register Symphony context providers for L4 code_extension
-        from opal_server.symphony_ext import (
+        # Register CAGE context providers for L4 code_extension
+        from opal_server.cage_ext import (
             set_data_update_publisher,
             set_statistics_context_provider,
             set_policy_bundle_context_provider,
@@ -579,12 +579,12 @@ class OpalServer:
         if codegen_provider is not None:
             set_codegen_provider(codegen_provider)
 
-        # Mount Symphony extension framework endpoints
-        mount_symphony(
+        # Mount CAGE extension framework endpoints
+        mount_cage(
             app,
-            symphony_registry,
-            symphony_prompts,
-            goex_registry=symphony_goex_registry,
+            cage_registry,
+            cage_prompts,
+            rxr_registry=cage_rxr_registry,
         )
 
         return app

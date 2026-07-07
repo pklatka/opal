@@ -2,9 +2,9 @@
 OPAL MCP Server (FastMCP / Hand-Written)
 =========================================
 
-Exposes the Symphony-enhanced OPAL server API as MCP tools.
+Exposes the CAGE-enhanced OPAL server API as MCP tools.
 At startup, the tool descriptions are enriched with per-level extension
-documentation built directly from the local Symphony app and registry.
+documentation built directly from the local CAGE app and registry.
 
 Usage:
     uv run python mcp_server.py
@@ -23,9 +23,9 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from opal_server.main import app
-from opal_server.symphony_ext import extension_registry
+from opal_server.cage_ext import extension_registry
 from benchmark_helpers import normalize_benchmark_data_update_entry_aliases
-from symphony.manifest import (
+from cage.manifest import (
     build_tool_descriptions_from_app,
     parse_tool_description_metadata,
 )
@@ -36,7 +36,7 @@ API_URL = os.getenv("OPAL_API_URL") or os.getenv("API_URL", "http://127.0.0.1:80
 CLIENT_TOKEN = os.getenv("OPAL_CLIENT_TOKEN") or os.getenv("CLIENT_TOKEN")
 DATASOURCE_TOKEN = os.getenv("OPAL_DATA_SOURCE_TOKEN") or os.getenv("DATA_SOURCE_TOKEN")
 MASTER_TOKEN = os.getenv("OPAL_AUTH_MASTER_TOKEN") or os.getenv("MASTER_TOKEN")
-GOEX_GATE_ENV = "SYMPHONY_MCP_ALLOW_GOEX"
+RXR_GATE_ENV = "CAGE_MCP_ALLOW_RXR"
 
 _BENCHMARK_KNOWN_TOPICS = [
     "policy_data",
@@ -144,16 +144,16 @@ def _master_headers() -> dict[str, str]:
 
 
 def _resolve_execution_mode(requested: str | None) -> str:
-    """Allow GoEx by default; set SYMPHONY_MCP_ALLOW_GOEX=false to force direct."""
+    """Allow RXR by default; set CAGE_MCP_ALLOW_RXR=false to force direct."""
     normalized = (requested or "direct").strip().lower()
-    if normalized != "goex":
+    if normalized != "rxr":
         return "direct"
-    gate_value = os.getenv(GOEX_GATE_ENV)
+    gate_value = os.getenv(RXR_GATE_ENV)
     if gate_value is None or gate_value.strip().lower() in {"1", "true", "yes", "on"}:
-        return "goex"
+        return "rxr"
     logger.warning(
-        "Downgrading execution_mode=goex to direct because %s=%r",
-        GOEX_GATE_ENV,
+        "Downgrading execution_mode=rxr to direct because %s=%r",
+        RXR_GATE_ENV,
         gate_value,
     )
     return "direct"
@@ -239,14 +239,14 @@ async def _delete(path: str, body: dict, headers: dict[str, str] | None = None) 
 
 
 # ---------------------------------------------------------------------------
-# Try to build enriched descriptions directly from the Symphony app
+# Try to build enriched descriptions directly from the CAGE app
 # ---------------------------------------------------------------------------
 
 _tool_descriptions: dict[str, str] = {}
 try:
     _tool_descriptions = build_tool_descriptions_from_app(app, extension_registry)
 except Exception as e:
-    logger.debug(f"Could not build Symphony tool descriptions: {e}")
+    logger.debug(f"Could not build CAGE tool descriptions: {e}")
 
 
 def _get_desc(name: str, fallback: str, *, benchmark_note: bool = False) -> str:
@@ -341,9 +341,9 @@ def _benchmark_statistics_payload(raw_payload: dict[str, Any]) -> dict[str, Any]
         "extension_triggered",
         "generated_code",
         "endpoint_source",
-        "goex_record_id",
-        "goex_mode",
-        "goex_reversal_code",
+        "rxr_record_id",
+        "rxr_mode",
+        "rxr_reversal_code",
         "needs_extension",
         "extension_context",
         "extension_results",
@@ -369,9 +369,9 @@ def _with_visible_levels(description: str, levels: list[str]) -> str:
         return description
     metadata["visible_levels"] = levels
     return (
-        f"{visible}\n<symphony-metadata>\n"
+        f"{visible}\n<cage-metadata>\n"
         f"{json.dumps(metadata, ensure_ascii=True)}\n"
-        f"</symphony-metadata>"
+        f"</cage-metadata>"
     )
 
 
@@ -382,9 +382,9 @@ def _append_visible_note(description: str, note: str) -> str:
     combined = f"{visible.rstrip()}\n{note}"
     metadata["default_description"] = combined
     return (
-        f"{combined}\n<symphony-metadata>\n"
+        f"{combined}\n<cage-metadata>\n"
         f"{json.dumps(metadata, ensure_ascii=True)}\n"
-        f"</symphony-metadata>"
+        f"</cage-metadata>"
     )
 
 
@@ -403,7 +403,7 @@ if _tool_descriptions.get("code_extension"):
             "read_policy_module(...), upsert_policy_module(...), and "
             "delete_policy_module(...). Use extension_point='policy_hotfix' "
             "(hyphen alias 'policy-hotfix') for reversible policy mutations in "
-            "GoEx mode. The policy-bundle module source field is `rego`; there "
+            "RXR mode. The policy-bundle module source field is `rego`; there "
             "is no `content` field. The prompt parameter is required; explicit "
             "Python code should assign a native dict/list to `result`."
         ),
@@ -414,7 +414,7 @@ if _tool_descriptions.get("code_extension"):
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP(
-    "opal-symphony-mcp",
+    "opal-cage-mcp",
     host="0.0.0.0",
     transport_security=_mcp_transport_security,
 )
@@ -551,7 +551,7 @@ async def get_benchmark_data_candidates(
     if reversal_code is not None:
         body["reversal_code"] = reversal_code
     data = await _get_with_body(
-        "/symphony/benchmark/data-candidates",
+        "/cage/benchmark/data-candidates",
         params={"label": label},
         body=body,
         headers=_client_headers(),
@@ -742,7 +742,7 @@ async def code_extension(
         body["reversal_code"] = reversal_code
     if context_overrides is not None:
         body["context_overrides"] = context_overrides
-    data = await _post("/symphony/code_extension", body, headers=_client_headers())
+    data = await _post("/cage/code_extension", body, headers=_client_headers())
     return json.dumps(data, indent=2)
 
 

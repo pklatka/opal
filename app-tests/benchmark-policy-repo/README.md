@@ -1,4 +1,4 @@
-# Benchmark policy repository (Symphony OPAL)
+# Benchmark policy repository (CAGE OPAL)
 
 Deterministic Rego modules for the OPAL focused benchmark suite. Seeded by
 `scripts/start_opal.sh` into `examples/opal/regoclone/opal_repo_clone/`.

@@ -461,12 +461,12 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
     If the OPAL server does not have statistics enabled, the route will
     return 501 Not Implemented
     """
-    from symphony import tool, handle_extension
-    from symphony.models import SymphonyExtensionBody
-    from opal_server.symphony_ext import (
+    from cage import tool, handle_extension
+    from cage.models import CAGEExtensionBody
+    from opal_server.cage_ext import (
         post_statistics,
         _statistics_capabilities,
-        goex_registry,
+        rxr_registry,
     )
 
     router = APIRouter()
@@ -509,9 +509,9 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
     )
     @router.get("/statistics", response_model=ServerStats)
     async def get_statistics(
-        ext: Optional[SymphonyExtensionBody] = Body(None),
+        ext: Optional[CAGEExtensionBody] = Body(None),
     ):
-        """Route to serve server statistics with optional Symphony extension.
+        """Route to serve server statistics with optional CAGE extension.
 
         Extension levels:
         - **L0**: Return raw statistics
@@ -522,7 +522,7 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
         Extension fields are accepted as a JSON request body to avoid URL
         length limits on large extension_code payloads.
         """
-        ext = ext or SymphonyExtensionBody()
+        ext = ext or CAGEExtensionBody()
         extension_level = ext.extension_level
         extension_code = ext.extension_code
         task_description = ext.task_description
@@ -551,7 +551,7 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
             default_fn=lambda: state_dict,
             context=context,
             all_capabilities=_statistics_capabilities,
-            goex_registry=goex_registry,
+            rxr_registry=rxr_registry,
             original_call='result = context["stats"]',
             default_source=_default_get_statistics,
             endpoint_path="/statistics",
@@ -582,10 +582,10 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
         state_dict["extension_triggered"] = ext.triggered
         state_dict["generated_code"] = ext.generated_code
         state_dict["endpoint_source"] = ext.endpoint_source
-        if ext.goex_record_id:
-            state_dict["goex_record_id"] = ext.goex_record_id
-            state_dict["goex_mode"] = execution_mode == "goex"
-            state_dict["goex_reversal_code"] = ext.goex_reversal_code
+        if ext.rxr_record_id:
+            state_dict["rxr_record_id"] = ext.rxr_record_id
+            state_dict["rxr_mode"] = execution_mode == "rxr"
+            state_dict["rxr_reversal_code"] = ext.rxr_reversal_code
 
         return JSONResponse(_serialize_state(state_dict))
 

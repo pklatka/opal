@@ -1,18 +1,18 @@
-# OPAL (Open Policy Administration Layer) — Symphony Integration
+# OPAL (Open Policy Administration Layer) — CAGE Integration
 
 **Source:** [permitio/opal](https://github.com/permitio/opal)
-**Primary testing focus:** L0–L4 level comparison, cross-LLM evaluation, GoEx modes for mutation safety
+**Primary testing focus:** L0–L4 level comparison, cross-LLM evaluation, RXR modes for mutation safety
 
 ## Overview
 
-OPAL is an administration layer for Open Policy Agent (OPA) that detects changes to both policy and policy data in real time, pushing live updates to policy agents. This example integrates Symphony's extension framework directly into the OPAL server and benchmarks it through stateful outage scenarios instead of toy extraction prompts.
+OPAL is an administration layer for Open Policy Agent (OPA) that detects changes to both policy and policy data in real time, pushing live updates to policy agents. This example integrates CAGE's extension framework directly into the OPAL server and benchmarks it through stateful outage scenarios instead of toy extraction prompts.
 
-The benchmark focuses on Symphony-on-OPAL behavior:
+The benchmark focuses on CAGE-on-OPAL behavior:
 
 - applying an existing production break-glass policy to an active outage gate
 - deciding whether to trigger an emergency rollout from live OPAL statistics
 - creating a new tightly scoped outage policy when no existing module covers the action
-- replaying the same mutation patterns through GoEx with record capture and reversal
+- replaying the same mutation patterns through RXR with record capture and reversal
 
 A set of **policy CRUD endpoints** still allows LLM agents to create, update, and delete `.rego` modules directly in the tracked Git clone. Each operation commits locally so changes are immediately visible in subsequent bundle fetches and properly reported in differential bundles.
 
@@ -64,10 +64,10 @@ A set of **policy CRUD endpoints** still allows LLM agents to create, update, an
 | `get_server_count` | `(stats) → int` | `False` | Number of active server replicas |
 | `get_client_count` | `(stats) → int` | `False` | Total number of connected clients |
 
-## GoEx Configuration
+## RXR Configuration
 
 ```python
-goex_registry = GoExRegistry(auto_approve=False, auto_approve_readonly=True)
+rxr_registry = RXRRegistry(auto_approve=False, auto_approve_readonly=True)
 ```
 
 - Read-only code (bundle filtering, statistics analysis, entry inspection) → **auto-approved**
@@ -78,13 +78,13 @@ goex_registry = GoExRegistry(auto_approve=False, auto_approve_readonly=True)
 | Extension Point | Description | Endpoint |
 |---|---|---|
 | `post_policy_bundle` | Filter, transform, or augment policy bundles before serving | `GET /policy` |
-| `policy_hotfix` | Create or revise an emergency policy module via the tracked Git repo | Existing `POST`/`PUT /policy/modules` endpoints for L1-L3, `POST /symphony/code_extension` for L4 |
+| `policy_hotfix` | Create or revise an emergency policy module via the tracked Git repo | Existing `POST`/`PUT /policy/modules` endpoints for L1-L3, `POST /cage/code_extension` for L4 |
 | `post_data_update` | Validate, filter, deduplicate, or transform data entries before publishing | `POST /data/config` |
 | `post_statistics` | Compute aggregates, detect anomalies, or reformat statistics | `GET /statistics` |
 
 ## Policy CRUD Tools
 
-LLM agents can manage Rego policy modules directly via MCP tools that map to the `/policy/modules` REST endpoints. Each mutation writes to the local Git clone and commits the change, so the standard `GET /policy` bundle-serving path picks it up immediately. L1-L3 reversible extension/goex behavior is carried by optional parameters on these same endpoints; no separate hotfix endpoint is added.
+LLM agents can manage Rego policy modules directly via MCP tools that map to the `/policy/modules` REST endpoints. Each mutation writes to the local Git clone and commits the change, so the standard `GET /policy` bundle-serving path picks it up immediately. L1-L3 reversible extension/rxr behavior is carried by optional parameters on these same endpoints; no separate hotfix endpoint is added.
 
 | MCP Tool | HTTP Method | Description |
 |---|---|---|
@@ -92,7 +92,7 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 | `create_policy_module` | `POST /policy/modules` | Write a new `.rego` file and commit; returns `old_hash` / `new_hash` |
 | `update_policy_module` | `PUT /policy/modules` | Overwrite an existing `.rego` file and commit |
 | `delete_policy_module` | `DELETE /policy/modules` | Remove a `.rego` file and commit; shows in `deleted_files` for diff bundles |
-**Request body fields (create / update):** `module_path` (repo-relative, e.g. `compliance/block.rego`), `rego_content` (raw Rego source), `commit_message` (optional). Extension/goex runs may also include `extension_level`, `extension_code`, `task_description`, `execution_mode`, `reversal_code`, and `package_name`.
+**Request body fields (create / update):** `module_path` (repo-relative, e.g. `compliance/block.rego`), `rego_content` (raw Rego source), `commit_message` (optional). Extension/rxr runs may also include `extension_level`, `extension_code`, `task_description`, `execution_mode`, `reversal_code`, and `package_name`.
 
 **Change detection:** After a CRUD commit, fetching a differential bundle with `base_hash` set to the pre-mutation hash correctly reports additions, modifications, and deletions through OPAL's standard `BundleMaker.make_diff_bundle` mechanism.
 
@@ -102,8 +102,8 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 |---|---|---|---|
 | `GET` | `/policy` | L0–L3 | Fetch policy bundle from tracked Git repository |
 | `GET` | `/policy/modules` | — | List all Rego policy modules in the repository |
-| `POST` | `/policy/modules` | L0–L3 | Create a new Rego policy module (Git commit); optional L1-L3 extension/goex parameters use the same endpoint |
-| `PUT` | `/policy/modules` | L0–L3 | Update an existing Rego policy module (Git commit); optional L1-L3 extension/goex parameters use the same endpoint |
+| `POST` | `/policy/modules` | L0–L3 | Create a new Rego policy module (Git commit); optional L1-L3 extension/rxr parameters use the same endpoint |
+| `PUT` | `/policy/modules` | L0–L3 | Update an existing Rego policy module (Git commit); optional L1-L3 extension/rxr parameters use the same endpoint |
 | `DELETE` | `/policy/modules` | — | Delete a Rego policy module (Git commit) |
 | `POST` | `/data/config` | L0–L3 | Publish data update to OPAL clients |
 | `GET` | `/data/config` | — | Get base data source configuration |
@@ -111,10 +111,10 @@ LLM agents can manage Rego policy modules directly via MCP tools that map to the
 | `GET` | `/stats` | — | Get brief statistics (client/server counts) |
 | `POST` | `/token` | — | Generate JWT access token |
 | `GET` | `/healthcheck` | — | Server health check |
-| `POST` | `/symphony/code_extension` | L4 | Freeform code generation from capabilities (L4 entry point) |
-| `GET` | `/symphony/goex/records` | — | GoEx SRE endpoints |
+| `POST` | `/cage/code_extension` | L4 | Freeform code generation from capabilities (L4 entry point) |
+| `GET` | `/cage/rxr/records` | — | RXR SRE endpoints |
 
-> **L4 note:** At L4 the agent sends a freeform prompt to `POST /symphony/code_extension`, which generates and executes code using registered capabilities directly. Ordinary endpoint and utility MCP tools are not exposed at L4; equivalent behavior must be reached through code-extension capabilities.
+> **L4 note:** At L4 the agent sends a freeform prompt to `POST /cage/code_extension`, which generates and executes code using registered capabilities directly. Ordinary endpoint and utility MCP tools are not exposed at L4; equivalent behavior must be reached through code-extension capabilities.
 
 ## Quick Start
 
@@ -124,7 +124,7 @@ cd examples/opal
 # Clone policy repo (needed for GET /policy endpoint)
 mkdir -p regoclone && git clone https://github.com/permitio/opal-example-policy-repo regoclone/opal_repo_clone
 
-# Terminal 1: Start the OPAL server with Symphony
+# Terminal 1: Start the OPAL server with CAGE
 OPAL_REPO_WATCHER_ENABLED=false OPAL_PUBLISHER_ENABLED=false OPAL_STATISTICS_ENABLED=true \
 OPAL_POLICY_REPO_REUSE_CLONE_PATH=true \
   uv run python -m uvicorn opal_server.main:app --reload --timeout-keep-alive 300
@@ -141,7 +141,7 @@ For server-side code generation (L2/L3 endpoint extensions and L4 code-extension
 ```bash
 OPAL_REPO_WATCHER_ENABLED=false OPAL_PUBLISHER_ENABLED=false OPAL_STATISTICS_ENABLED=true \
 OPAL_POLICY_REPO_REUSE_CLONE_PATH=true \
-SYMPHONY_CODEGEN_PROVIDER=gemini SYMPHONY_CODEGEN_MODEL=gemini-2.5-flash \
+CAGE_CODEGEN_PROVIDER=gemini CAGE_CODEGEN_MODEL=gemini-2.5-flash \
   uv run python -m uvicorn opal_server.main:app --reload --timeout-keep-alive 300
 ```
 
@@ -153,7 +153,7 @@ The benchmark source of truth is now a real OPAL deployment:
 - 2 `opal_server` replicas
 - 8 `opal_client` workloads with inline OPA
 - a benchmark data-source service
-- embedded Symphony MCP + `/symphony/code_extension`
+- embedded CAGE MCP + `/cage/code_extension`
 
 Local `kind` bootstrap from repo root:
 
@@ -184,7 +184,7 @@ Existing EKS cluster deployment:
 
 ```bash
 export AWS_REGION=us-east-1
-./scripts/opal/deploy_opal_k8.sh --target eks --namespace symphony-opal
+./scripts/opal/deploy_opal_k8.sh --target eks --namespace cage-opal
 ```
 
 Run the benchmark against the deployed cluster:
@@ -192,17 +192,17 @@ Run the benchmark against the deployed cluster:
 ```bash
 OPAL_BASE_URL=http://PUBLIC_LB:8080 \
 OPAL_ADMIN_BASE_URL=http://127.0.0.1:8001 \
-OPAL_NAMESPACE=symphony-opal \
+OPAL_NAMESPACE=cage-opal \
 ./scripts/run_opal_tests.sh anthropic haiku
 
 OPAL_BASE_URL=http://PUBLIC_LB:8080 \
 OPAL_ADMIN_BASE_URL=http://127.0.0.1:8001 \
-OPAL_NAMESPACE=symphony-opal \
-./scripts/run_opal_goex_tests.sh anthropic haiku
+OPAL_NAMESPACE=cage-opal \
+./scripts/run_opal_rxr_tests.sh anthropic haiku
 ```
 
 `run_opal_tests.sh` now resets benchmark state before each standard-suite job
-via `POST /symphony/benchmark/reset`. Use `--no-reset-state` or
+via `POST /cage/benchmark/reset`. Use `--no-reset-state` or
 `OPAL_BENCHMARK_RESET=0` only when you explicitly want to reuse prior state.
 
 Terraform-based cloud deployments for both EKS and GKE now live under:
@@ -268,32 +268,32 @@ Scenarios:
 
 Standard-suite verification:
 
-- benchmark state is reset before every job via `POST /symphony/benchmark/reset`
+- benchmark state is reset before every job via `POST /cage/benchmark/reset`
 - the runner checks the broken baseline before launching the agent
 - after the run, the runner verifies live client state directly
 - strict fenced JSON is still required and compared against the expected
   summary fixture
 
-### GoEx suite
+### RXR suite
 
-Run the GoEx matrix:
+Run the RXR matrix:
 
 ```bash
-./scripts/run_opal_goex_tests.sh --levels "L0 L1 L2 L3 L4" --cases "test2 test1 test3" anthropic haiku
+./scripts/run_opal_rxr_tests.sh --levels "L0 L1 L2 L3 L4" --cases "test2 test1 test3" anthropic haiku
 ```
 
-GoEx cases:
+RXR cases:
 
 - `test2`: existing cache-failover hotfix scenario
-- `test1`: update `incident/payments_outage_gate.rego` through GoEx and then
+- `test1`: update `incident/payments_outage_gate.rego` through RXR and then
   reverse it
-- `test3`: create `incident/payments_replica_promote_hotfix.rego` through GoEx
+- `test3`: create `incident/payments_replica_promote_hotfix.rego` through RXR
   and then reverse it
 
-GoEx verification:
+RXR verification:
 
 - reset benchmark state before each case
-- capture exactly one GoEx record in `L1` to `L4`
+- capture exactly one RXR record in `L1` to `L4`
 - verify the live state change on OPAL clients
 - reverse the record
 - verify the original baseline is restored
@@ -301,21 +301,21 @@ GoEx verification:
 ### Cross-model comparison
 
 Both suites export benchmark diagnostics under `stats/opal/` and
-`stats/opal/goex/`, including normalized token and latency fields plus L0 delta
+`stats/opal/rxr/`, including normalized token and latency fields plus L0 delta
 fields. That lets you compare:
 
 - L0 baseline vs extension-assisted levels
 - providers and models
 - reasoning vs no-reasoning
-- direct mutation vs GoEx mutation
+- direct mutation vs RXR mutation
 
-### GoEx SRE endpoints
+### RXR SRE endpoints
 
-After a GoEx run:
+After a RXR run:
 
 ```bash
-curl http://127.0.0.1:8000/symphony/goex/records
-curl "http://127.0.0.1:8000/symphony/goex/records?status=executed"
-curl http://127.0.0.1:8000/symphony/goex/records/<RECORD_ID>
-curl -X POST http://127.0.0.1:8000/symphony/goex/records/<RECORD_ID>/reverse
+curl http://127.0.0.1:8000/cage/rxr/records
+curl "http://127.0.0.1:8000/cage/rxr/records?status=executed"
+curl http://127.0.0.1:8000/cage/rxr/records/<RECORD_ID>
+curl -X POST http://127.0.0.1:8000/cage/rxr/records/<RECORD_ID>/reverse
 ```

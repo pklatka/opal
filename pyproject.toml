@@ -1,10 +1,10 @@
 [project]
-name = "opal-symphony"
+name = "opal-cage"
 version = "0.1.0"
-description = "OPAL (Open Policy Administration Layer) with Symphony extension framework"
+description = "OPAL (Open Policy Administration Layer) with CAGE extension framework"
 requires-python = ">=3.11"
 dependencies = [
-    "symphony-api",
+    "cage-api",
     "opal-server",
     "opal-client",
     "opal-common",
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-symphony-api = { workspace = true }
+cage-api = { workspace = true }
 opal-server = { path = "packages/opal-server", editable = true }
 opal-client = { path = "packages/opal-client", editable = true }
 opal-common = { path = "packages/opal-common", editable = true }

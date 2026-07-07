@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-OPAL GoEx harness — stateful OPAL mutation benchmarks with record capture and reversal.
+OPAL RXR harness — stateful OPAL mutation benchmarks with record capture and reversal.
 
 Usage (from repo root):
-    uv run python examples/opal/agent_cli_goex.py \\
+    uv run python examples/opal/agent_cli_rxr.py \\
         --api-url http://127.0.0.1:8000 \\
         --mcp-url http://127.0.0.1:8000/mcp/sse \\
-        --codegen-provider ws://127.0.0.1:8000/symphony/codegen/ws \\
+        --codegen-provider ws://127.0.0.1:8000/cage/codegen/ws \\
         --provider anthropic --level L1
 """
 
@@ -31,10 +31,10 @@ _repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from symphony import SymphonyRunner
-from symphony.providers import create_provider
-from symphony.stats_export import make_export_callbacks
-from opal_server.benchmark_scenarios import get_goex_scenario
+from cage import CAGERunner
+from cage.providers import create_provider
+from cage.stats_export import make_export_callbacks
+from opal_server.benchmark_scenarios import get_rxr_scenario
 
 
 class _CodegenWebsocketClient:
@@ -63,7 +63,7 @@ class _CodegenWebsocketClient:
             finally:
                 loop.close()
 
-        self._thread = threading.Thread(target=_run, daemon=True, name="opal-goex-codegen")
+        self._thread = threading.Thread(target=_run, daemon=True, name="opal-rxr-codegen")
         self._thread.start()
         self._ready.wait(timeout=5.0)
         if self._error:
@@ -127,43 +127,43 @@ class _CodegenWebsocketClient:
         return {"ok": True, "content": "".join(parts) or resp.content}
 
 
-DEFAULT_SCENARIO = get_goex_scenario("test2")
+DEFAULT_SCENARIO = get_rxr_scenario("test2")
 HOTFIX_MODULE_PATH = DEFAULT_SCENARIO.module_path
 
-GOEX_SYSTEM_PROMPTS: dict[str, str] = {
+RXR_SYSTEM_PROMPTS: dict[str, str] = {
     "L1": (
-        "You are running an OPAL GoEx round-trip test at L1. "
-        "For each required mutation, use GoEx-enabled execution at this level with valid forward execution logic "
+        "You are running an OPAL RXR round-trip test at L1. "
+        "For each required mutation, use RXR-enabled execution at this level with valid forward execution logic "
         "and valid reversal logic. Do not rely on direct baseline execution. In OPAL, perform the reversible "
-        "mutation through `create_policy_module` or `update_policy_module` with GoEx enabled. When calling that "
+        "mutation through `create_policy_module` or `update_policy_module` with RXR enabled. When calling that "
         "endpoint, include explicit `extension_level=\"L1\"` and `extension_code`. The forward path should apply "
         "exactly the requested mutation, leave it applied, and return stable hotfix details for the changed module, "
         "including `module_path`, `package_name`, `action`, and `rego_content`. The reversal path should read that "
         "execution result, undo exactly what was created or updated, and report its outcome."
     ),
     "L2": (
-        "You are running an OPAL GoEx round-trip test at L2. "
-        "For each required mutation, use GoEx-enabled execution at this level and request extension behavior with "
+        "You are running an OPAL RXR round-trip test at L2. "
+        "For each required mutation, use RXR-enabled execution at this level and request extension behavior with "
         "reversal support. Do not rely on direct baseline execution. In OPAL, perform the reversible mutation "
-        "through `create_policy_module` or `update_policy_module` with GoEx enabled. When calling that endpoint, "
+        "through `create_policy_module` or `update_policy_module` with RXR enabled. When calling that endpoint, "
         "include explicit `extension_level=\"L2\"` and extension input (`task_description` or `extension_code`). "
         "Apply exactly the requested mutation once per target module, return stable hotfix details for the changed "
         "module, including `module_path`, `package_name`, `action`, and `rego_content`, and ensure the reversal "
         "path can undo those changes from the execution result."
     ),
     "L3": (
-        "You are running an OPAL GoEx round-trip test at L3. "
-        "For each required mutation, use GoEx-enabled execution at this level with source-aware reversible behavior. "
+        "You are running an OPAL RXR round-trip test at L3. "
+        "For each required mutation, use RXR-enabled execution at this level with source-aware reversible behavior. "
         "In OPAL, perform the reversible mutation through `create_policy_module` or `update_policy_module` with "
-        "GoEx enabled. When calling that endpoint, include explicit `extension_level=\"L3\"` and `task_description`. "
+        "RXR enabled. When calling that endpoint, include explicit `extension_level=\"L3\"` and `task_description`. "
         "Apply exactly one mutation per requested target module. Do not perform exploratory, duplicate, or debugging "
         "mutations. Return stable hotfix details for what was created or updated, including `module_path`, "
         "`package_name`, `action`, and `rego_content`, so reversal can undo exactly those changes from the "
         "execution result."
     ),
     "L4": (
-        "You are running an OPAL GoEx round-trip test at L4. "
-        "Use GoEx-enabled reversible execution at this level. In OPAL, perform the reversible mutation through "
+        "You are running an OPAL RXR round-trip test at L4. "
+        "Use RXR-enabled reversible execution at this level. In OPAL, perform the reversible mutation through "
         "`code_extension`. The forward path should perform only the requested mutation, leave it applied, and assign "
         "the final structured payload to the expected result variable. Do not perform exploratory or debugging "
         "mutations. Keep the hotfix in a single `code_extension` execution. The reversal path must undo the created "
@@ -173,8 +173,8 @@ GOEX_SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 DIRECT_SYSTEM_PROMPT = (
-    "You are running the OPAL GoEx baseline at L0. Do not call code_extension and do not call any "
-    "extension/goex variant of the policy module endpoints. Use list_policy_modules if needed to determine whether "
+    "You are running the OPAL RXR baseline at L0. Do not call code_extension and do not call any "
+    "extension/rxr variant of the policy module endpoints. Use list_policy_modules if needed to determine whether "
     "the hotfix module already exists. If it already exists, call update_policy_module; otherwise call "
     "create_policy_module. Use module_path and commit_message from the task, and provide rego_content "
     "that implements the requested outage policy change. Follow the task's grading contract exactly and "
@@ -242,7 +242,7 @@ def _resolve_api_url(args: argparse.Namespace) -> str:
 
 def _reverse_record(api_url: str, record_id: str) -> dict[str, Any]:
     resp = httpx.post(
-        f"{api_url.rstrip('/')}/symphony/goex/records/{record_id}/reverse",
+        f"{api_url.rstrip('/')}/cage/rxr/records/{record_id}/reverse",
         headers=_auth_headers(),
         timeout=60,
     )
@@ -252,7 +252,7 @@ def _reverse_record(api_url: str, record_id: str) -> dict[str, Any]:
 
 def _get_record(api_url: str, record_id: str) -> dict[str, Any]:
     resp = httpx.get(
-        f"{api_url.rstrip('/')}/symphony/goex/records/{record_id}",
+        f"{api_url.rstrip('/')}/cage/rxr/records/{record_id}",
         headers=_auth_headers(),
         timeout=15,
     )
@@ -262,7 +262,7 @@ def _get_record(api_url: str, record_id: str) -> dict[str, Any]:
 
 def _reset_benchmark_state(api_url: str) -> dict[str, Any]:
     resp = httpx.post(
-        f"{api_url.rstrip('/')}/symphony/benchmark/reset",
+        f"{api_url.rstrip('/')}/cage/benchmark/reset",
         headers=_auth_headers(),
         timeout=60,
     )
@@ -357,7 +357,7 @@ def _wait_for_policy_state(
 def _fetch_stack_info(api_url: str) -> dict[str, Any] | None:
     try:
         resp = httpx.get(
-            f"{api_url.rstrip('/')}/symphony/benchmark/info",
+            f"{api_url.rstrip('/')}/cage/benchmark/info",
             headers=_auth_headers(),
             timeout=10,
         )
@@ -443,16 +443,16 @@ def _hotfix_snapshot_from_record(record: dict[str, Any]) -> dict[str, Any]:
         first = results[0] if isinstance(results, list) and results else None
         snapshot = _flatten_hotfix_result(first if isinstance(first, dict) else None)
     if record.get("id"):
-        snapshot.setdefault("goex_record_id", record["id"])
+        snapshot.setdefault("rxr_record_id", record["id"])
     if record.get("reversal_code"):
-        snapshot.setdefault("goex_reversal_code", record["reversal_code"])
+        snapshot.setdefault("rxr_reversal_code", record["reversal_code"])
     return snapshot
 
 
 def _hotfix_snapshot_from_code(code: str | None) -> dict[str, Any]:
     """Best-effort static recovery for generated policy-hotfix code.
 
-    Some older L4/GoEx runs printed a JSON payload instead of assigning it to
+    Some older L4/RXR runs printed a JSON payload instead of assigning it to
     `result`, so the tool result may be empty even though the generated code
     contains enough stable metadata for diagnostics.
     """
@@ -608,10 +608,10 @@ def _normalize_hotfix_snapshot(name: str, data: dict[str, Any]) -> dict[str, Any
     code_snapshot = _hotfix_snapshot_from_code(data.get("generated_code"))
     for key, value in code_snapshot.items():
         snapshot.setdefault(key, value)
-    if data.get("goex_record_id"):
-        snapshot["goex_record_id"] = data["goex_record_id"]
-    if data.get("goex_reversal_code"):
-        snapshot["goex_reversal_code"] = data["goex_reversal_code"]
+    if data.get("rxr_record_id"):
+        snapshot["rxr_record_id"] = data["rxr_record_id"]
+    if data.get("rxr_reversal_code"):
+        snapshot["rxr_reversal_code"] = data["rxr_reversal_code"]
     if data.get("generated_code"):
         snapshot["generated_code"] = data["generated_code"]
     has_hotfix_details = any(snapshot.get(key) for key in ("action", "module_path", "rego_content"))
@@ -657,12 +657,12 @@ def _build_capturing_callbacks(
             benchmark_label=benchmark_label,
             extra_fields={
                 "mcp_url": mcp_url,
-                "goex_harness": "opal",
+                "rxr_harness": "opal",
                 "codegen_provider": codegen_provider or "",
             },
         )
     else:
-        base = SymphonyRunner.terminal_callbacks()
+        base = CAGERunner.terminal_callbacks()
     base_on_tool_result = base["on_tool_result"]
 
     def on_tool_result(name: str, result: str) -> None:
@@ -675,7 +675,7 @@ def _build_capturing_callbacks(
         if snapshot is None:
             return
         hotfix_snapshots.append(snapshot)
-        rid = snapshot.get("goex_record_id") or data.get("goex_record_id")
+        rid = snapshot.get("rxr_record_id") or data.get("rxr_record_id")
         if rid:
             record_ids.append(str(rid))
 
@@ -1040,7 +1040,7 @@ def run_test(args: argparse.Namespace) -> bool:
         print(f"  {FAIL}  {exc}")
         return False
 
-    scenario = get_goex_scenario(args.case)
+    scenario = get_rxr_scenario(args.case)
     task = args.task or scenario.task
     default_models = {
         "anthropic": "haiku",
@@ -1110,7 +1110,7 @@ def run_test(args: argparse.Namespace) -> bool:
         record_ids,
         hotfix_snapshots,
         export_stats=args.export_stats,
-        stats_app="opal-goex",
+        stats_app="opal-rxr",
         level=args.level,
         provider=args.provider,
         model=model,
@@ -1133,7 +1133,7 @@ def run_test(args: argparse.Namespace) -> bool:
         codegen_client.start()
         print(f"  [Codegen Worker] Connected to {args.codegen_provider}")
 
-    runner = SymphonyRunner(
+    runner = CAGERunner(
         model=model,
         reasoning=not args.no_reasoning,
         provider=args.provider,
@@ -1143,8 +1143,8 @@ def run_test(args: argparse.Namespace) -> bool:
 
     try:
         system_prompt = None
-        if args.execution_mode == "goex":
-            base_prompt = GOEX_SYSTEM_PROMPTS.get(args.level)
+        if args.execution_mode == "rxr":
+            base_prompt = RXR_SYSTEM_PROMPTS.get(args.level)
             if base_prompt is not None:
                 system_prompt = base_prompt
         elif args.level == "L0":
@@ -1186,7 +1186,7 @@ def run_test(args: argparse.Namespace) -> bool:
     last = hotfix_snapshots[-1]
     action = last.get("action")
 
-    if args.execution_mode != "goex":
+    if args.execution_mode != "rxr":
         module = _wait_for_hotfix_module(api_url, scenario.module_path)
         if module is None:
             print(f"  {FAIL}  Hotfix module {scenario.module_path} was not found after execution.")
@@ -1310,7 +1310,7 @@ def run_test(args: argparse.Namespace) -> bool:
                     print(f"  {FAIL}  hotfix still visible on opal-client-authz-a after cleanup.")
                     return False
         print(f"  {PASS}  L0 baseline created the change and reset restored the repo.")
-        print("\n[4/6] Skipping GoEx record/reversal checks in direct mode.")
+        print("\n[4/6] Skipping RXR record/reversal checks in direct mode.")
         print("\n[5/6] Skipping reversal (direct mode).")
         print("\n[6/6] Comparing state after cleanup to state before task...")
         print(f"  {PASS}  State is identical - round-trip complete.")
@@ -1327,31 +1327,31 @@ def run_test(args: argparse.Namespace) -> bool:
 
     expected_record_ids = _ordered_unique_nonempty(
         [
-            str(snapshot.get("goex_record_id") or "")
+            str(snapshot.get("rxr_record_id") or "")
             for snapshot in hotfix_snapshots
-            if snapshot.get("goex_record_id")
+            if snapshot.get("rxr_record_id")
         ]
     )
     if not expected_record_ids:
-        print(f"  {FAIL}  No GoEx record captured.")
+        print(f"  {FAIL}  No RXR record captured.")
         return False
     record_ids[:] = _ordered_unique_nonempty(record_ids)
     if len(record_ids) != len(expected_record_ids):
         print(
-            f"  {FAIL}  Expected {len(expected_record_ids)} GoEx record(s) from successful "
+            f"  {FAIL}  Expected {len(expected_record_ids)} RXR record(s) from successful "
             f"mutation turn(s), but captured {len(record_ids)}."
         )
         return False
     if record_ids != expected_record_ids:
         print(
-            f"  {FAIL}  Captured GoEx record ids do not match successful mutation turn ids. "
+            f"  {FAIL}  Captured RXR record ids do not match successful mutation turn ids. "
             f"expected={expected_record_ids}, captured={record_ids}"
         )
         return False
 
     print(
-        f"\n[4/6] Checking GoEx records ({len(record_ids)} captured, "
-        f"{len(expected_record_ids)} expected from successful GoEx mutation turn(s))..."
+        f"\n[4/6] Checking RXR records ({len(record_ids)} captured, "
+        f"{len(expected_record_ids)} expected from successful RXR mutation turn(s))..."
     )
     fetched_records: list[dict[str, Any]] = []
     for rid in record_ids:
@@ -1383,7 +1383,7 @@ def run_test(args: argparse.Namespace) -> bool:
         summary_token=scenario.summary_token,
     ):
         print(
-            f"  {FAIL}  GoEx hotfix result did not contain the expected module details. "
+            f"  {FAIL}  RXR hotfix result did not contain the expected module details. "
             f"Snapshot: {json.dumps(effective_snapshot, indent=2)[:1200]}"
         )
         return False
@@ -1397,12 +1397,12 @@ def run_test(args: argparse.Namespace) -> bool:
         timeout_seconds=30,
     ):
         print(
-            f"  {FAIL}  GoEx record captured a plausible hotfix snapshot, but the server bundle did not "
+            f"  {FAIL}  RXR record captured a plausible hotfix snapshot, but the server bundle did not "
             f"reflect the expected policy markers within the bounded readback window."
         )
         return False
     print(
-        f"  {PASS}  GoEx record captured a valid hotfix and admin API readback matched "
+        f"  {PASS}  RXR record captured a valid hotfix and admin API readback matched "
         f"(action={action or 'unknown'})"
     )
     if args.namespace:
@@ -1534,7 +1534,7 @@ def run_test(args: argparse.Namespace) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="OPAL GoEx harness: policy hotfix apply + record reversal.",
+        description="OPAL RXR harness: policy hotfix apply + record reversal.",
     )
     parser.add_argument(
         "--api-url",
@@ -1577,9 +1577,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--execution-mode",
-        choices=["direct", "goex"],
+        choices=["direct", "rxr"],
         default="direct",
-        help="L0: direct (no GoEx). L1-L4 with goex: use --execution-mode goex",
+        help="L0: direct (no RXR). L1-L4 with rxr: use --execution-mode rxr",
     )
     parser.add_argument("--task", default=None)
     parser.add_argument("--export-stats", metavar="FILE", default=None)
@@ -1593,7 +1593,7 @@ def main() -> None:
     ok = run_test(args)
     print()
     print("=" * 50)
-    print(f"  OPAL GoEx harness: {PASS if ok else FAIL}")
+    print(f"  OPAL RXR harness: {PASS if ok else FAIL}")
     print("=" * 50)
     sys.exit(0 if ok else 1)
 

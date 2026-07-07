@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from git import Actor
 from git.repo import Repo
 
-_COMMIT_AUTHOR = Actor("OPAL Symphony", "symphony@opal.local")
+_COMMIT_AUTHOR = Actor("OPAL CAGE", "cage@opal.local")
 
 
 class PolicyModulePathError(ValueError):
