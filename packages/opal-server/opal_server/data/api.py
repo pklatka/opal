@@ -12,14 +12,88 @@ from opal_common.authentication.verifier import Unauthorized
 from opal_common.logger import logger
 from opal_common.schemas.data import (
     DataSourceConfig,
+    DataSourceEntry,
     DataUpdate,
     DataUpdateReport,
     ServerDataSourceConfig,
 )
+from pydantic import Field as PydanticField
+
+
+class DataUpdateWithExtension(DataUpdate):
+    """DataUpdate extended with CAGE extension fields.
+
+    All extension fields are optional with safe defaults so existing
+    callers that send a plain DataUpdate body continue to work unchanged.
+    """
+
+    extension_level: str = PydanticField(
+        default="L0",
+        description="CAGE extension level (L0-L3)",
+    )
+    extension_code: Optional[str] = PydanticField(
+        default=None,
+        description="Python extension code for L1/L2",
+    )
+    task_description: Optional[str] = PydanticField(
+        default=None,
+        description="Natural-language task description for L2/L3",
+    )
+    execution_mode: str = PydanticField(
+        default="direct",
+        description="Execution mode: direct or rxr",
+    )
+    reversal_code: Optional[str] = PydanticField(
+        default=None,
+        description="Undo code for RXR mode",
+    )
 from opal_common.schemas.security import PeerType
 from opal_common.urls import set_url_query_param
 from opal_server.config import opal_server_config
 from opal_server.data.data_update_publisher import DataUpdatePublisher
+from cage import tool, handle_extension
+
+from opal_server.cage_ext import (
+    post_data_update,
+    _data_update_capabilities,
+    rxr_registry,
+)
+
+
+def _default_publish_data_update(update: DataUpdate) -> list[dict]:
+    """Default L0 data update logic — serialize entries to dicts."""
+    return [
+        e.dict() if hasattr(e, "dict") else e.model_dump()
+        for e in update.entries
+    ]
+
+
+def _normalize_extension_entry_aliases(item: dict) -> dict:
+    """Coerce common extension output aliases back into DataSourceEntry shape."""
+    normalized = dict(item)
+    if "topics" not in normalized and isinstance(normalized.get("topic"), str):
+        normalized["topics"] = [normalized["topic"]]
+    if "dst_path" not in normalized and isinstance(normalized.get("path"), str):
+        normalized["dst_path"] = normalized["path"]
+    if "url" not in normalized and isinstance(normalized.get("source"), str):
+        normalized["url"] = normalized.pop("source")
+    data_source = normalized.pop("data_source", None)
+    if isinstance(data_source, dict):
+        if "url" not in normalized and isinstance(data_source.get("url"), str):
+            normalized["url"] = data_source["url"]
+        if "save_method" not in normalized and isinstance(data_source.get("save_method"), str):
+            normalized["save_method"] = data_source["save_method"]
+    return normalized
+
+
+def _callback_urls(update: DataUpdate) -> list[str]:
+    urls: list[str] = []
+    for callback in update.callback.callbacks:
+        if isinstance(callback, (list, tuple)):
+            urls.append(str(callback[0]))
+        else:
+            urls.append(str(callback))
+    return urls
 
 
 def init_data_updates_router(
@@ -63,6 +137,11 @@ def init_data_updates_router(
         )
         return {}  # simply returns 200
 
+    @tool(
+        name="get_data_sources_config",
+        method="GET",
+        path=opal_server_config.DATA_CONFIG_ROUTE,
+    )
     @router.get(
         opal_server_config.DATA_CONFIG_ROUTE,
         response_model=DataSourceConfig,
@@ -104,19 +183,67 @@ def init_data_updates_router(
                 detail="Did not find a data source configuration!",
             )
 
+    @tool(
+        name="publish_data_update",
+        method="POST",
+        path=opal_server_config.DATA_CONFIG_ROUTE,
+        levels=["L0", "L1", "L2", "L3"],
+        level_params={
+            "L0": ["entries", "reason", "id", "callback"],
+            "L1": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "execution_mode", "reversal_code"],
+            "L2": ["entries", "reason", "id", "callback", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+            "L3": ["entries", "reason", "id", "callback", "extension_level", "task_description", "execution_mode", "reversal_code"],
+        },
+        level_overrides={
+            "L0": {
+                "description": (
+                    "Publish a data update to OPAL clients. Inputs: entries, reason, id, callback. "
+                    "Each entry carries topics, url, dst_path/path, and save_method; response includes status and callback_urls."
+                ),
+            },
+            "L1": {
+                "description": (
+                    "Same as L0 plus extension_code and reversal_code. Extension code receives candidate entries "
+                    "before publish and should validate, filter, deduplicate, or transform them."
+                ),
+            },
+            "L2": {
+                "description": (
+                    "Same as L1 plus task_description for server-side codegen before publish. "
+                    "Use for production-safe candidate filtering while preserving callback and save_method requirements."
+                ),
+            },
+            "L3": {
+                "description": (
+                    "Same as L2, but source-aware: task_description drives codegen using endpoint source and entry context. "
+                    "Return only entries that should be published."
+                ),
+            },
+        },
+    )
     @router.post(opal_server_config.DATA_CONFIG_ROUTE)
     async def publish_data_update_event(
-        update: DataUpdate, claims: JWTClaims = Depends(authenticator)
+        update: DataUpdateWithExtension,
+        claims: JWTClaims = Depends(authenticator),
     ):
-        """Provides data providers (i.e: one of the backend services owned by
-        whomever deployed OPAL) with the ability to push incremental policy
-        data updates to OPAL clients.
+        """Publish incremental policy data updates to OPAL clients.
 
-        Each update contains instructions on:
-        - how to fetch the data
-        - where should OPAL client store the data in OPA document hierarchy
-        - what clients should receive the update (through topics, only clients subscribed to provided topics will be notified)
+        Extension levels:
+        - **L0**: Publish entries as-is to subscribed clients
+        - **L1**: Post-processing via extension_code (validate, filter, deduplicate)
+        - **L2**: Auto-generated extension code for advanced entry processing
+        - **L3**: Source-aware — LLM reads endpoint code and generates extensions
+
+        Extension fields (extension_level, extension_code, task_description,
+        execution_mode, reversal_code) are part of the JSON request body to
+        avoid URL length limits on large extension_code payloads.
         """
+        extension_level = update.extension_level
+        extension_code = update.extension_code
+        task_description = update.task_description
+        execution_mode = update.execution_mode
+        reversal_code = update.reversal_code
+
         try:
             require_peer_type(
                 authenticator, claims, PeerType.datasource
@@ -128,7 +255,76 @@ def init_data_updates_router(
             logger.error(f"Unauthorized to publish update: {repr(e)}")
             raise
 
-        await data_update_publisher.publish_data_updates(update)
-        return {"status": "ok"}
+        entries_data = _default_publish_data_update(update)
+        context = {
+            "entries": entries_data,
+            "reason": update.reason,
+            "entry_count": len(entries_data),
+        }
+
+        outcome = await handle_extension(
+            level=extension_level,
+            extension_code=extension_code,
+            task_description=task_description,
+            execution_mode=execution_mode,
+            reversal_code=reversal_code,
+            extension_point=post_data_update,
+            default_fn=lambda: entries_data,
+            context=context,
+            all_capabilities=_data_update_capabilities,
+            rxr_registry=rxr_registry,
+            original_call='result = context["entries"]',
+            default_source=_default_publish_data_update,
+            endpoint_path="/data/config",
+            trigger_condition=lambda res: bool(extension_code) or bool(task_description),
+        )
+
+        ext = outcome.ext_result
+
+        # If extension triggered, rebuild update with filtered/modified entries
+        if ext.triggered and isinstance(outcome.results, list):
+            try:
+                new_entries = [
+                    DataSourceEntry(
+                        **{
+                            k: v
+                            for k, v in _normalize_extension_entry_aliases(e).items()
+                            if v is not None
+                        }
+                    )
+                    if isinstance(e, dict) else e
+                    for e in outcome.results
+                ]
+                update = DataUpdate(
+                    id=update.id,
+                    entries=new_entries,
+                    reason=update.reason,
+                    callback=update.callback,
+                )
+            except Exception as e:
+                logger.warning(f"Extension returned invalid entries: {e}")
+
+        if data_update_publisher is not None:
+            await data_update_publisher.publish_data_updates(update)
+        else:
+            logger.warning("Data update publisher not configured; update not broadcast")
+
+        response: dict = {"status": "ok"}
+        response["callback_urls"] = _callback_urls(update)
+        if outcome.needs_extension:
+            response["needs_extension"] = True
+            if outcome.extension_context:
+                response["extension_context"] = outcome.extension_context
+        if ext.triggered:
+            response["extension_triggered"] = True
+            response["generated_code"] = ext.generated_code or extension_code
+            response["endpoint_source"] = ext.endpoint_source
+            response["extension_results"] = outcome.results
+            response["entries_published"] = len(update.entries)
+        if ext.rxr_record_id:
+            response["rxr_record_id"] = ext.rxr_record_id
+            response["rxr_mode"] = execution_mode == "rxr"
+            response["rxr_reversal_code"] = ext.rxr_reversal_code
+        return response
 
     return router

@@ -88,8 +88,17 @@ class OpaServerOptions(BaseModel):
 
     def get_cli_options_dict(self):
         """Returns a dict that can be passed to the OPA cli."""
+        if hasattr(self, "model_dump"):
+            return self.model_dump(
+                mode="json",
+                exclude_none=True,
+                by_alias=True,
+                exclude={"files", "v0_compatible"},
+            )
         return self.dict(
-            exclude_none=True, by_alias=True, exclude={"files", "v0_compatible"}
+            exclude_none=True,
+            by_alias=True,
+            exclude={"files", "v0_compatible"},
         )
 
 

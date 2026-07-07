@@ -38,7 +38,7 @@ class PolicyBundle(BaseSchema):
     )
     data_modules: List[DataModule]
     policy_modules: List[RegoModule]
-    deleted_files: Optional[DeletedFiles]
+    deleted_files: Optional[DeletedFiles] = None
 
 
 class PolicyUpdateMessage(BaseSchema):

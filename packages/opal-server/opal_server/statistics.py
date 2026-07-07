@@ -8,7 +8,8 @@ from uuid import uuid4
 
 import opal_server
 import pydantic
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, status
+from fastapi.responses import JSONResponse
 from fastapi_websocket_pubsub.event_notifier import Subscription, TopicList
 from fastapi_websocket_pubsub.pub_sub_server import PubSubEndpoint
 from opal_common.async_utils import TasksPool
@@ -106,6 +107,12 @@ class OpalStatistics:
         self._seen_servers: Dict[str, datetime] = {}
         self._periodic_keepalive_task: asyncio.Task | None = None
 
+        # Seed demo clients for testing if enabled (default: true)
+        if os.environ.get("OPAL_SEED_DEMO_CLIENTS", "true").lower() in (
+            "true", "1", "yes",
+        ):
+            self._seed_demo_clients()
+
     @property
     def state(self) -> ServerStats:
         return self._state
@@ -151,6 +158,65 @@ class OpalStatistics:
 
     def _publish(self, channel: str, message: Any):
         self._publish_tasks.add_task(self._endpoint.publish([channel], message))
+
+    def _seed_demo_clients(self):
+        """Populate statistics with realistic simulated OPAL clients.
+
+        Called on startup when OPAL_SEED_DEMO_CLIENTS is set (defaults to
+        "true").  Creates 23 clients across 5 active topics so that
+        statistics-related tests exercise real data analysis — the dataset is
+        intentionally too large to count by eye. The benchmark models a
+        production OPAL control plane with policy, incident, directory, and
+        feature rollout traffic. "compliance_audit" is intentionally absent so
+        zero-subscriber detection still produces a non-trivial finding.
+        """
+        demo_clients = [
+            # Web API tier
+            ("opal-client-web-api-01",              ["policy_data", "feature_flags"]),
+            ("opal-client-web-api-02",              ["policy_data", "feature_flags"]),
+            ("opal-client-web-api-03",              ["policy_data"]),
+            ("opal-client-web-api-04",              ["policy_data"]),
+            # Authorization services handling incident escalations
+            ("opal-client-authz-svc-01",            ["policy_data", "incident_access"]),
+            ("opal-client-authz-svc-02",            ["policy_data", "incident_access"]),
+            ("opal-client-authz-svc-03",            ["incident_access"]),
+            ("opal-client-authz-svc-04",            ["incident_access"]),
+            # Directory sync workers
+            ("opal-client-directory-sync-01",       ["directory_sync"]),
+            ("opal-client-directory-sync-02",       ["directory_sync"]),
+            ("opal-client-directory-sync-03",       ["directory_sync", "policy_data"]),
+            ("opal-client-directory-sync-04",       ["directory_sync", "incident_access"]),
+            ("opal-client-directory-sync-05",       ["directory_sync", "feature_flags"]),
+            # SRE entry points and gateways
+            ("opal-client-sre-gateway-01",          ["policy_data", "incident_access", "audit_logs"]),
+            ("opal-client-sre-gateway-02",          ["policy_data"]),
+            # Reporting and mobile consumers
+            ("opal-client-reporting-01",            ["policy_data"]),
+            ("opal-client-reporting-02",            ["policy_data"]),
+            ("opal-client-mobile-api-01",           ["policy_data", "feature_flags"]),
+            ("opal-client-mobile-api-02",           ["policy_data", "feature_flags"]),
+            # Background workers
+            ("opal-client-worker-01",               ["policy_data"]),
+            ("opal-client-worker-02",               ["policy_data"]),
+            # Audit and rollout services
+            ("opal-client-audit-svc-01",            ["audit_logs"]),
+            ("opal-client-rollout-orchestrator-01", ["feature_flags"]),
+            # NOTE: "compliance_audit" is intentionally absent — zero subscribers.
+        ]
+
+        for client_id, topics in demo_clients:
+            rpc_id = uuid4().hex
+            ch = ChannelStats(rpc_id=rpc_id, client_id=client_id, topics=topics)
+            self._state.clients[client_id] = [ch]
+            self._rpc_id_to_client_id[rpc_id] = client_id
+
+        # Add a second server replica so server_count is non-trivial
+        self._state.servers.add(uuid4().hex)
+
+        logger.info(
+            "Seeded {count} demo clients into statistics",
+            count=len(demo_clients),
+        )
 
     async def run(self):
         """Subscribe to two channels to be able to sync add and delete of
@@ -369,6 +435,24 @@ class OpalStatistics:
             )
 
 
+def _serialize_state(obj):
+    """Make a state dict JSON-serializable (datetime → ISO, set → list)."""
+    if isinstance(obj, dict):
+        return {k: _serialize_state(v) for k, v in obj.items()}
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, set):
+        return sorted(obj)
+    elif isinstance(obj, list):
+        return [_serialize_state(item) for item in obj]
+    return obj
+
+
+def _default_get_statistics(stats_state) -> dict:
+    """Default L0 statistics logic — serialize state to dict."""
+    return stats_state.dict() if hasattr(stats_state, "dict") else stats_state.model_dump()
+
+
 def init_statistics_router(stats: Optional[OpalStatistics] = None):
     """Initializes a route where a client (or any other network peer) can
     inquire what opal clients are currently connected to the server and on what
@@ -377,11 +461,73 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
     If the OPAL server does not have statistics enabled, the route will
     return 501 Not Implemented
     """
+    from cage import tool, handle_extension
+    from cage.models import CAGEExtensionBody
+    from opal_server.cage_ext import (
+        post_statistics,
+        _statistics_capabilities,
+        rxr_registry,
+    )
+
     router = APIRouter()
 
+    @tool(
+        name="get_statistics",
+        method="GET",
+        path="/statistics",
+        levels=["L0", "L1", "L2", "L3"],
+        level_params={
+            "L0": [],
+            "L1": ["extension_level", "extension_code", "execution_mode", "reversal_code"],
+            "L2": ["extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+            "L3": ["extension_level", "task_description", "execution_mode", "reversal_code"],
+        },
+        level_overrides={
+            "L0": {
+                "description": (
+                    "Get OPAL server statistics: connected clients, subscribed topics, server replicas, and uptime. "
+                    "Benchmark agents should compute topic counts from client topic membership."
+                ),
+            },
+            "L1": {
+                "description": (
+                    "Same as L0 plus extension_code and reversal_code. Extension code receives raw stats "
+                    "and may return aggregate fields such as topic counts without mutating state."
+                ),
+            },
+            "L2": {
+                "description": (
+                    "Same as L1 plus task_description for server-side statistics aggregation codegen."
+                ),
+            },
+            "L3": {
+                "description": (
+                    "Same as L2, but source-aware: task_description drives codegen using endpoint source and live stats context."
+                ),
+            },
+        },
+    )
     @router.get("/statistics", response_model=ServerStats)
-    async def get_statistics():
-        """Route to serve server statistics."""
+    async def get_statistics(
+        ext: Optional[CAGEExtensionBody] = Body(None),
+    ):
+        """Route to serve server statistics with optional CAGE extension.
+
+        Extension levels:
+        - **L0**: Return raw statistics
+        - **L1**: Post-processing via extension_code (aggregation, alerting)
+        - **L2**: Auto-generated extension code for advanced analytics
+        - **L3**: Source-aware — LLM reads endpoint code and generates extensions
+
+        Extension fields are accepted as a JSON request body to avoid URL
+        length limits on large extension_code payloads.
+        """
+        ext = ext or CAGEExtensionBody()
+        extension_level = ext.extension_level
+        extension_code = ext.extension_code
+        task_description = ext.task_description
+        execution_mode = ext.execution_mode
+        reversal_code = ext.reversal_code
         if stats is None:
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -391,11 +537,66 @@ def init_statistics_router(stats: Optional[OpalStatistics] = None):
                 },
             )
         logger.info("Serving statistics")
-        return stats.state
+        state = stats.state
+        state_dict = _default_get_statistics(state)
+        context = {"stats": state_dict}
 
+        outcome = await handle_extension(
+            level=extension_level,
+            extension_code=extension_code,
+            task_description=task_description,
+            execution_mode=execution_mode,
+            reversal_code=reversal_code,
+            extension_point=post_statistics,
+            default_fn=lambda: state_dict,
+            context=context,
+            all_capabilities=_statistics_capabilities,
+            rxr_registry=rxr_registry,
+            original_call='result = context["stats"]',
+            default_source=_default_get_statistics,
+            endpoint_path="/statistics",
+            trigger_condition=lambda res: bool(extension_code) or bool(task_description),
+        )
+
+        ext = outcome.ext_result
+
+        # L0 path — return raw state model
+        if not ext.triggered and not outcome.needs_extension:
+            return state
+
+        # needs_extension path
+        if outcome.needs_extension:
+            return JSONResponse(_serialize_state({
+                **state_dict,
+                "needs_extension": True,
+                "extension_context": outcome.extension_context,
+            }))
+
+        # Extension triggered — merge results into state_dict
+        results = outcome.results
+        if len(results) == 1 and isinstance(results[0], dict):
+            state_dict.update(results[0])
+        elif results:
+            state_dict["extension_results"] = results
+
+        state_dict["extension_triggered"] = ext.triggered
+        state_dict["generated_code"] = ext.generated_code
+        state_dict["endpoint_source"] = ext.endpoint_source
+        if ext.rxr_record_id:
+            state_dict["rxr_record_id"] = ext.rxr_record_id
+            state_dict["rxr_mode"] = execution_mode == "rxr"
+            state_dict["rxr_reversal_code"] = ext.rxr_reversal_code
+
+        return JSONResponse(_serialize_state(state_dict))
+
+    @tool(
+        name="get_stats_brief",
+        method="GET",
+        path="/stats",
+    )
     @router.get("/stats", response_model=ServerStatsBrief)
     async def get_stat_counts():
-        """Route to serve only server and client instanace counts."""
+        """Route to serve only server and client instance counts."""
         if stats is None:
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,

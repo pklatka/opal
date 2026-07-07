@@ -1,0 +1,23 @@
+[project]
+name = "opal-cage"
+version = "0.1.0"
+description = "OPAL (Open Policy Administration Layer) with CAGE extension framework"
+requires-python = ">=3.11"
+dependencies = [
+    "cage-api",
+    "opal-server",
+    "opal-client",
+    "opal-common",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "pydantic>=1.9.1",
+    "mcp[cli]>=1.0.0",
+    "httpx>=0.28.0",
+    "typing-inspect>=0.9.0",
+]
+
+[tool.uv.sources]
+cage-api = { workspace = true }
+opal-server = { path = "packages/opal-server", editable = true }
+opal-client = { path = "packages/opal-client", editable = true }
+opal-common = { path = "packages/opal-common", editable = true }

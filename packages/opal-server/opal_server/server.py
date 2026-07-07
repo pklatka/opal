@@ -6,7 +6,8 @@ import traceback
 from functools import partial
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI
+from fastapi import Body, Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi_websocket_pubsub.event_broadcaster import EventBroadcasterContextManager
 from opal_common.authentication.deps import JWTAuthenticator, StaticBearerAuthenticator
 from opal_common.authentication.signer import JWTSigner
@@ -15,7 +16,7 @@ from opal_common.config import opal_common_config
 from opal_common.logger import configure_logs, logger
 from opal_common.middleware import configure_middleware
 from opal_common.monitoring import apm, metrics
-from opal_common.schemas.data import ServerDataSourceConfig
+from opal_common.schemas.data import DataSourceEntry, DataUpdate, ServerDataSourceConfig
 from opal_common.synchronization.named_lock import NamedLock
 from opal_common.topics.publisher import (
     PeriodicPublisher,
@@ -27,6 +28,7 @@ from opal_server.data.api import init_data_updates_router
 from opal_server.data.data_update_publisher import DataUpdatePublisher
 from opal_server.loadlimiting import init_loadlimit_router
 from opal_server.policy.bundles.api import router as bundles_router
+from opal_server.policy.crud_api import init_policy_crud_router
 from opal_server.policy.watcher.factory import setup_watcher_task
 from opal_server.policy.watcher.task import PolicyWatcherTask
 from opal_server.policy.webhook.api import init_git_webhook_router
@@ -39,6 +41,67 @@ from opal_server.scopes.scope_repository import ScopeRepository
 from opal_server.security.api import init_security_router
 from opal_server.security.jwks import JwksStaticEndpoint
 from opal_server.statistics import OpalStatistics, init_statistics_router
+from opal_server.cage_ext import (
+    _data_update_capabilities,
+    extension_registry as cage_registry,
+    rxr_registry as cage_rxr_registry,
+    post_benchmark_candidate_feed,
+)
+from opal_server.policy.module_ops import (
+    delete_comma_named_rego_modules,
+    delete_policy_module as delete_policy_module_from_repo,
+    upsert_policy_module as upsert_policy_module_in_repo,
+)
+from opal_server.benchmark_scenarios import (
+    benchmark_data_candidates,
+    benchmark_reset_delete_paths,
+    benchmark_reset_entries,
+    benchmark_reset_policy_modules,
+)
+from cage import SYSTEM_PROMPTS as cage_prompts, mount_cage
+
+
+def _create_codegen_provider():
+    """Create an LLM provider for server-side code generation.
+
+    Reads ``CAGE_CODEGEN_PROVIDER`` and ``CAGE_CODEGEN_MODEL`` from
+    the environment.  Returns ``None`` if no provider is configured, which
+    causes the server to fall back to ``needs_extension`` (client-side
+    generation).
+    """
+    provider_name = os.environ.get("CAGE_CODEGEN_PROVIDER")
+    if not provider_name:
+        return None
+    model = os.environ.get("CAGE_CODEGEN_MODEL")
+    from cage.providers import create_provider
+    kwargs = {}
+    if model:
+        kwargs["model"] = model
+    return create_provider(provider_name, **kwargs)
+
+
+def _get_repo_or_none(config):
+    """Return the policy Git Repo if it's cloned and ready, else None."""
+    from pathlib import Path
+    from git.repo import Repo
+    from opal_common.git_utils.repo_cloner import RepoClonePathFinder
+
+    clone_path_finder = RepoClonePathFinder(
+        base_clone_path=config.POLICY_REPO_CLONE_PATH,
+        clone_subdirectory_prefix=config.POLICY_REPO_CLONE_FOLDER_PREFIX,
+        use_fixed_path=config.POLICY_REPO_REUSE_CLONE_PATH,
+    )
+    repo_path = clone_path_finder.get_clone_path()
+    if not repo_path:
+        return None
+    git_path = Path(repo_path) / ".git"
+    if not git_path.exists():
+        return None
+    return Repo(repo_path)
+
+
+def _default_benchmark_candidates(label: str) -> list[dict]:
+    return benchmark_data_candidates(label)
 
 
 class OpalServer:
@@ -178,6 +241,7 @@ class OpalServer:
 
         self.watcher: PolicyWatcherTask = None
         self.leadership_lock: Optional[NamedLock] = None
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
 
         if opal_server_config.SCOPES:
             self._redis_db = RedisDB(opal_server_config.REDIS_URL)
@@ -198,6 +262,21 @@ class OpalServer:
             + " continuous data update notifications via REST api, which are then pushed to clients.",
             version="0.1.0",
         )
+
+        # Codegen websocket: allows a remote agent_cli to act as a code-generation
+        # worker for L2/L3/L4 server-side extensions.  The route MUST be registered
+        # before any HTTP routes or middleware because Starlette matches routes in
+        # registration order — if an HTTP route is registered first, Starlette will
+        # match it for the /cage/codegen/ws path and reject the WebSocket
+        # upgrade with a 403.  mount_cage() also registers this route, but it
+        # runs after all HTTP endpoints are defined, which is too late.
+        from fastapi import WebSocket as _WebSocket
+
+        @app.websocket("/cage/codegen/ws")
+        async def cage_codegen_worker(websocket: _WebSocket):
+            from cage.providers.websocket_codegen import get_codegen_broker
+            broker = get_codegen_broker()
+            await broker.register_fastapi_worker(websocket)
 
         configure_middleware(app)
         self._configure_api_routes(app)
@@ -242,6 +321,14 @@ class OpalServer:
             tags=["Bundle Server"],
             dependencies=[Depends(authenticator)],
         )
+        policy_crud_router = init_policy_crud_router(
+            pubsub_endpoint=self.pubsub.endpoint,
+        )
+        app.include_router(
+            policy_crud_router,
+            tags=["Policy CRUD"],
+            dependencies=[Depends(authenticator)],
+        )
         app.include_router(data_updates_router, tags=["Data Updates"])
         app.include_router(webhook_router, tags=["Github Webhook"])
         app.include_router(security_router, tags=["Security"])
@@ -274,10 +361,231 @@ class OpalServer:
             self.jwks_endpoint.configure_app(app)
 
         # top level routes (i.e: healthchecks)
+        from cage import handle_extension, tool as cage_tool
+        from cage.models import CAGEExtensionBody
+
+        @cage_tool(name="healthcheck", method="GET", path="/healthcheck")
         @app.get("/healthcheck", include_in_schema=False)
-        @app.get("/", include_in_schema=False)
         def healthcheck():
+            """Check if the OPAL server is healthy and responding."""
             return {"status": "ok"}
+
+        @app.get("/", include_in_schema=False)
+        def root():
+            return {"status": "ok"}
+
+        @app.post(
+            "/cage/benchmark/reset",
+            tags=["CAGE"],
+            dependencies=[Depends(authenticator)],
+        )
+        async def benchmark_reset():
+            """Restore OPAL benchmark state between standard benchmark jobs."""
+            if data_update_publisher is None:
+                raise HTTPException(status_code=503, detail="data update publisher unavailable")
+
+            reset_entries = [DataSourceEntry(**entry) for entry in benchmark_reset_entries()]
+            await data_update_publisher.publish_data_updates(
+                DataUpdate(
+                    reason="Restore OPAL benchmark baseline",
+                    entries=reset_entries,
+                )
+            )
+
+            try:
+                repo = _get_repo_or_none(opal_server_config)
+                if repo is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="benchmark reset failed: tracked policy repo unavailable",
+                    )
+                legacy_cleanup = delete_comma_named_rego_modules(
+                    repo,
+                    "Cleanup malformed comma-named benchmark modules during reset",
+                )
+                for module_path in benchmark_reset_delete_paths():
+                    delete_policy_module_from_repo(
+                        repo,
+                        module_path,
+                        f"Cleanup benchmark module {module_path} during reset",
+                        missing_ok=True,
+                    )
+                for module_path, rego_content in benchmark_reset_policy_modules().items():
+                    upsert_policy_module_in_repo(
+                        repo,
+                        module_path,
+                        rego_content,
+                        f"Restore benchmark baseline module {module_path}",
+                    )
+                await self.pubsub.endpoint.publish(
+                    opal_server_config.POLICY_REPO_WEBHOOK_TOPIC
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"benchmark reset failed to restore policy baseline: {exc!s}",
+                ) from exc
+
+            return {
+                "ok": True,
+                "reason": "Restore OPAL benchmark baseline",
+                "paths_reset": [entry["dst_path"] for entry in benchmark_reset_entries()],
+                "policy_modules_restored": sorted(benchmark_reset_policy_modules()),
+                "policy_modules_removed": benchmark_reset_delete_paths(),
+                "legacy_policy_modules_removed": legacy_cleanup.get("module_paths", []),
+            }
+
+        @app.get(
+            "/cage/benchmark/info",
+            tags=["CAGE"],
+            dependencies=[Depends(authenticator)],
+        )
+        async def benchmark_info():
+            """Return effective benchmark stack configuration for drift/debug checks."""
+            return {
+                "ok": True,
+                "policy_repo_url": opal_server_config.POLICY_REPO_URL,
+                "policy_repo_branch": os.environ.get("OPAL_POLICY_REPO_MAIN_BRANCH", ""),
+                "policy_repo_manifest_path": opal_server_config.POLICY_REPO_MANIFEST_PATH,
+                "policy_webhook_topic": opal_server_config.POLICY_REPO_WEBHOOK_TOPIC,
+                "codegen_provider": os.environ.get("CAGE_CODEGEN_PROVIDER", ""),
+                "codegen_model": os.environ.get("CAGE_CODEGEN_MODEL", ""),
+                "build_id": os.environ.get("CAGE_BUILD_ID", ""),
+                "git_sha": os.environ.get("GIT_SHA", ""),
+            }
+
+        @cage_tool(
+            name="get_benchmark_data_candidates",
+            method="GET",
+            path="/cage/benchmark/data-candidates",
+            levels=["L0", "L1", "L2", "L3"],
+            level_params={
+                "L0": ["label"],
+                "L1": ["label", "extension_level", "extension_code", "execution_mode", "reversal_code"],
+                "L2": ["label", "extension_level", "extension_code", "task_description", "execution_mode", "reversal_code"],
+                "L3": ["label", "extension_level", "task_description", "execution_mode", "reversal_code"],
+            },
+            level_overrides={
+                "L0": {
+                    "description": (
+                        "Fetch benchmark candidate data-update entries. Inputs: label. "
+                        "Returns ok, label, candidate_count, and candidates with candidate_id, topics, dst_path, url, save_method, and reason."
+                    )
+                },
+                "L1": {
+                    "description": (
+                        "Same as L0 plus extension_code and reversal_code. Extension code may filter or transform the candidate list before return."
+                    )
+                },
+                "L2": {
+                    "description": (
+                        "Same as L1 plus task_description for server-side codegen over the candidate feed."
+                    )
+                },
+                "L3": {
+                    "description": (
+                        "Same as L2, but source-aware: task_description drives codegen using endpoint source and candidate context."
+                    )
+                },
+            },
+        )
+        @app.get(
+            "/cage/benchmark/data-candidates",
+            tags=["CAGE"],
+            dependencies=[Depends(authenticator)],
+        )
+        async def benchmark_data_candidates_feed(
+            label: str,
+            ext: CAGEExtensionBody | None = Body(None),
+        ):
+            """Return benchmark candidate data-update entries with optional CAGE filtering."""
+            ext = ext or CAGEExtensionBody()
+            candidates = _default_benchmark_candidates(label)
+            if not candidates:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"no benchmark data candidates configured for {label}",
+                )
+            candidate_context = {
+                "label": label,
+                "candidates": candidates,
+                "candidate_count": len(candidates),
+            }
+            outcome = await handle_extension(
+                level=ext.extension_level,
+                extension_code=ext.extension_code,
+                task_description=ext.task_description,
+                execution_mode=ext.execution_mode,
+                reversal_code=ext.reversal_code,
+                extension_point=post_benchmark_candidate_feed,
+                default_fn=lambda: candidates,
+                context=candidate_context,
+                all_capabilities=_data_update_capabilities,
+                rxr_registry=cage_rxr_registry,
+                original_call='result = context["candidates"]',
+                default_source=_default_benchmark_candidates,
+                endpoint_path="/cage/benchmark/data-candidates",
+                trigger_condition=lambda res: bool(ext.extension_code) or bool(ext.task_description),
+            )
+
+            response = {
+                "ok": True,
+                "label": label,
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+            }
+            if outcome.needs_extension:
+                response["needs_extension"] = True
+                if outcome.extension_context:
+                    response["extension_context"] = outcome.extension_context
+                return JSONResponse(response)
+
+            ext_result = outcome.ext_result
+            if ext_result.triggered and isinstance(outcome.results, list):
+                response["candidates"] = outcome.results
+                response["candidate_count"] = len(outcome.results)
+                response["extension_triggered"] = True
+                response["generated_code"] = ext_result.generated_code
+                response["endpoint_source"] = ext_result.endpoint_source
+            if ext_result.rxr_record_id:
+                response["rxr_record_id"] = ext_result.rxr_record_id
+                response["rxr_mode"] = ext.execution_mode == "rxr"
+                response["rxr_reversal_code"] = ext_result.rxr_reversal_code
+            return JSONResponse(response)
+
+        # Register CAGE context providers for L4 code_extension
+        from opal_server.cage_ext import (
+            set_data_update_publisher,
+            set_statistics_context_provider,
+            set_policy_bundle_context_provider,
+            set_policy_hotfix_notifier,
+            set_codegen_provider,
+        )
+        set_data_update_publisher(
+            data_update_publisher,
+            loop_getter=lambda: self._main_loop,
+        )
+        if self.opal_statistics is not None:
+            set_statistics_context_provider(lambda: self.opal_statistics.state)
+        set_policy_bundle_context_provider(
+            lambda: _get_repo_or_none(opal_server_config)
+        )
+        set_policy_hotfix_notifier(
+            self._publish_policy_hotfix_notification
+        )
+
+        # Configure server-side code generation provider (L2/L3/L4)
+        codegen_provider = _create_codegen_provider()
+        if codegen_provider is not None:
+            set_codegen_provider(codegen_provider)
+
+        # Mount CAGE extension framework endpoints
+        mount_cage(
+            app,
+            cage_registry,
+            cage_prompts,
+            rxr_registry=cage_rxr_registry,
+        )
 
         return app
 
@@ -292,6 +600,7 @@ class OpalServer:
         @app.on_event("startup")
         async def startup_event():
             logger.info("*** OPAL Server Startup ***")
+            self._main_loop = asyncio.get_running_loop()
 
             try:
                 self._task = asyncio.create_task(self.start_server_background_tasks())
@@ -308,6 +617,26 @@ class OpalServer:
             await self.stop_server_background_tasks()
 
         return app
+
+    def _publish_policy_hotfix_notification(self):
+        async def _publish():
+            await self.pubsub.endpoint.publish(opal_server_config.POLICY_REPO_WEBHOOK_TOPIC)
+
+        loop = self._main_loop
+        if loop is not None and loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                return loop.create_task(_publish())
+            return asyncio.run_coroutine_threadsafe(_publish(), loop)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_publish())
+        return running_loop.create_task(_publish())
 
     async def start_server_background_tasks(self):
         """Starts the background processes (as asyncio tasks) if such are
